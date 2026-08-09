@@ -13,7 +13,13 @@ import { fileURLToPath } from "node:url";
 import {
   ART_DIR,
   imageInputToGrid,
+  LEGEND_PATH,
+  MAX_DIMENSION,
+  MIN_DIMENSION,
+  nativeGridDimensions,
   PALETTE_ENTRIES,
+  PALETTE_HEX_PATH,
+  reloadPaletteFromDisk,
   spritePathFor,
 } from "../../scripts/lib/pixel-grid.mjs";
 
@@ -51,20 +57,74 @@ function readBody(req) {
   });
 }
 
-function listSprites() {
+function loadAllSpriteRecords() {
   return readdirSync(ART_DIR)
     .filter((f) => f.endsWith(".json") && f !== "legend.json")
     .map((f) => {
       try {
         const data = JSON.parse(readFileSync(join(ART_DIR, f), "utf8"));
-        if (!Array.isArray(data.rows)) return null;
-        return { name: data.name, width: data.width, height: data.height };
+        return Array.isArray(data.rows) ? data : null;
       } catch {
         return null;
       }
     })
-    .filter(Boolean)
+    .filter(Boolean);
+}
+
+function listSprites() {
+  return loadAllSpriteRecords()
+    .map((data) => ({ name: data.name, width: data.width, height: data.height }))
     .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+// Every char currently in use across every saved sprite -- row pixels and each sprite's own
+// local-palette keys -- so a newly assigned global palette char never collides with (and silently
+// reinterprets) a color some old sprite already saved under that char.
+function usedCharsAcrossAllSprites() {
+  const used = new Set();
+  for (const data of loadAllSpriteRecords()) {
+    for (const row of data.rows) for (const ch of row) used.add(ch);
+    for (const ch of Object.keys(data.localPalette ?? {})) used.add(ch);
+  }
+  return used;
+}
+
+// Sprite names whose `rows` actually paint the given char -- used to block deleting a palette
+// color still in use (gridToBoxShadow silently drops any pixel whose char has no matching global
+// or local color entry, so an unguarded delete would orphan those pixels rather than erroring).
+function spriteNamesUsingChar(char) {
+  return loadAllSpriteRecords()
+    .filter((data) => data.rows.some((row) => row.includes(char)))
+    .map((data) => data.name);
+}
+
+const NEW_COLOR_CHAR_CANDIDATES =
+  "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@%&*+=";
+
+function pickUnusedGlobalChar() {
+  const reserved = new Set(PALETTE_ENTRIES.map((e) => e.char));
+  const used = usedCharsAcrossAllSprites();
+  for (const ch of NEW_COLOR_CHAR_CANDIDATES) {
+    if (!reserved.has(ch) && !used.has(ch)) return ch;
+  }
+  return null;
+}
+
+function slugify(label) {
+  return label
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function uniqueCssVar(label) {
+  const base = `--color-${slugify(label) || "custom"}`;
+  const existing = new Set(PALETTE_ENTRIES.map((e) => e.cssVar));
+  if (!existing.has(base)) return base;
+  let i = 2;
+  while (existing.has(`${base}-${i}`)) i++;
+  return `${base}-${i}`;
 }
 
 function serveStatic(req, res) {
@@ -88,6 +148,79 @@ async function handleApi(req, res, url) {
       200,
       PALETTE_ENTRIES.map(({ char, hex, cssVar }) => ({ char, hex, cssVar })),
     );
+    return true;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/palette") {
+    let payload;
+    try {
+      const body = await readBody(req);
+      payload = JSON.parse(body.toString("utf8"));
+    } catch {
+      sendJson(res, 400, { error: "invalid JSON body" });
+      return true;
+    }
+    const { hex, label } = payload;
+    if (typeof hex !== "string" || !/^#[0-9a-fA-F]{6}$/.test(hex)) {
+      sendJson(res, 400, { error: "hex must be a #rrggbb color" });
+      return true;
+    }
+    if (typeof label !== "string" || label.trim().length === 0 || label.length > 60) {
+      sendJson(res, 400, { error: "label must be 1-60 characters" });
+      return true;
+    }
+    const char = pickUnusedGlobalChar();
+    if (!char) {
+      sendJson(res, 400, { error: "no free color slots left" });
+      return true;
+    }
+    const cssVar = uniqueCssVar(label);
+    const normalizedHex = hex.toLowerCase();
+
+    const legend = JSON.parse(readFileSync(LEGEND_PATH, "utf8"));
+    legend[char] = cssVar;
+    writeFileSync(LEGEND_PATH, `${JSON.stringify(legend, null, 2)}\n`);
+
+    const hexLines = readFileSync(PALETTE_HEX_PATH, "utf8")
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+    hexLines.push(normalizedHex.slice(1));
+    writeFileSync(PALETTE_HEX_PATH, `${hexLines.join("\n")}\n`);
+
+    reloadPaletteFromDisk();
+    sendJson(res, 200, { char, hex: normalizedHex, cssVar });
+    return true;
+  }
+
+  const paletteDeleteMatch = url.pathname.match(/^\/api\/palette\/([^/]+)$/);
+  if (req.method === "DELETE" && paletteDeleteMatch) {
+    const char = decodeURIComponent(paletteDeleteMatch[1]);
+    const legend = JSON.parse(readFileSync(LEGEND_PATH, "utf8"));
+    if (char.length !== 1 || char === "." || !(char in legend) || char === "_comment") {
+      sendJson(res, 404, { error: "not found" });
+      return true;
+    }
+    const inUse = spriteNamesUsingChar(char);
+    if (inUse.length > 0) {
+      sendJson(res, 409, { error: "color is in use", sprites: inUse });
+      return true;
+    }
+
+    const chars = Object.keys(legend).filter((k) => k !== "_comment" && k !== ".");
+    const index = chars.indexOf(char);
+    delete legend[char];
+    writeFileSync(LEGEND_PATH, `${JSON.stringify(legend, null, 2)}\n`);
+
+    const hexLines = readFileSync(PALETTE_HEX_PATH, "utf8")
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+    hexLines.splice(index, 1);
+    writeFileSync(PALETTE_HEX_PATH, `${hexLines.join("\n")}\n`);
+
+    reloadPaletteFromDisk();
+    sendJson(res, 200, { ok: true });
     return true;
   }
 
@@ -125,12 +258,21 @@ async function handleApi(req, res, url) {
         return true;
       }
       const { width, height, rows, overwrite, localPalette } = payload;
+      const dimsValid =
+        Number.isInteger(width) &&
+        Number.isInteger(height) &&
+        width >= MIN_DIMENSION &&
+        width <= MAX_DIMENSION &&
+        height >= MIN_DIMENSION &&
+        height <= MAX_DIMENSION;
       const rowsValid =
         Array.isArray(rows) &&
         rows.length === height &&
         rows.every((r) => typeof r === "string" && r.length === width);
-      if (width !== 64 || height !== 64 || !rowsValid) {
-        sendJson(res, 400, { error: "grid must be 64x64" });
+      if (!dimsValid || !rowsValid) {
+        sendJson(res, 400, {
+          error: `grid dimensions must be ${MIN_DIMENSION}-${MAX_DIMENSION}px and rows must match width/height`,
+        });
         return true;
       }
       const localPaletteValid =
@@ -162,7 +304,8 @@ async function handleApi(req, res, url) {
         return true;
       }
       const colorMode = url.searchParams.get("mode") === "conform" ? "conform" : "precise";
-      const grid = await imageInputToGrid(body, { size: 64, colorMode });
+      const { width, height } = await nativeGridDimensions(body, { maxDimension: MAX_DIMENSION });
+      const grid = await imageInputToGrid(body, { width, height, colorMode });
       sendJson(res, 200, {
         width: grid.width,
         height: grid.height,

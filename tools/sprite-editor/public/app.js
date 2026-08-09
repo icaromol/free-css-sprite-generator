@@ -1,13 +1,17 @@
 // Sprite editor client -- see README.md and docs/drawing-workflow.md. Plain vanilla JS, no
-// build step, no framework: there's no reason to reach for more machinery than a 64x64 paint
-// grid needs.
+// build step, no framework: there's no reason to reach for more machinery than a pixel-grid
+// paint tool needs.
 
-const SIZE = 64;
-const BASE_DISPLAY_SIZE = 512; // canvas backing resolution, see index.html -- never changes
-const CELL = BASE_DISPLAY_SIZE / SIZE; // backing-store px per grid cell, used for all drawing math
+// Keep in sync with scripts/lib/pixel-grid.mjs's MIN_DIMENSION/MAX_DIMENSION -- this is a
+// separate browser bundle with no shared import, so the ceiling is duplicated here.
+const MIN_DIMENSION = 8;
+const MAX_DIMENSION = 256;
+const DEFAULT_DIMENSION = 64;
+const CELL_PX = 8; // backing-store px per grid cell, fixed regardless of sprite size
+const TARGET_DISPLAY_EDGE = 560; // px -- auto-fit viewScale keeps the longer displayed edge near this
 const BRUSH_MIN = 1;
 const BRUSH_MAX = 8;
-const VIEW_SCALE_MIN = 0.5;
+const VIEW_SCALE_MIN = 0.15;
 const VIEW_SCALE_MAX = 4;
 const VIEW_ZOOM_STEP = 1.15;
 const COLOR_COUNT_MIN = 2;
@@ -30,22 +34,37 @@ const brushSizeInput = document.getElementById("brush-size");
 const brushSizeValueEl = document.getElementById("brush-size-value");
 const colorCountInput = document.getElementById("color-count");
 const colorCountValueEl = document.getElementById("color-count-value");
+const widthInput = document.getElementById("sprite-width");
+const heightInput = document.getElementById("sprite-height");
+const dimensionHintEl = document.getElementById("dimension-hint");
+const paletteAddToggleBtn = document.getElementById("palette-add-toggle");
+const paletteAddFormEl = document.getElementById("palette-add-form");
+const paletteAddColorInput = document.getElementById("palette-add-color");
+const paletteAddLabelInput = document.getElementById("palette-add-label");
+const paletteAddConfirmBtn = document.getElementById("palette-add-confirm");
+const paletteAddCancelBtn = document.getElementById("palette-add-cancel");
 
-let globalPalette = []; // [{ char, hex, cssVar, rgb }] -- the 20 shared tokens, from /api/palette
+let globalPalette = []; // [{ char, hex, cssVar, rgb }] -- the shared tokens, from /api/palette
 let globalHexByChar = new Map();
 let globalCssVarByChar = new Map();
 let globalRgbByChar = new Map();
-let localPalette = {}; // char -> hex, this sprite's own colors beyond the shared 20 (see
+let localPalette = {}; // char -> hex, this sprite's own colors beyond the shared palette (see
 // scripts/lib/pixel-grid.mjs's precise/conform import modes) -- changes per sprite, unlike the
 // global palette above.
 let localRgbByChar = new Map(); // derived from localPalette, rebuilt by setLocalPalette()
 let selectedChar = null;
 let eraserEl = null;
+let width = DEFAULT_DIMENSION; // current grid's pixel width -- mutable, see resizeGrid()
+let height = DEFAULT_DIMENSION; // current grid's pixel height
+let sourceCeilingWidth = null; // sourceGrid's native dims -- the resize ceiling. null (a blank
+let sourceCeilingHeight = null; // "new" sprite, no sourceGrid yet) means free range up to MAX_DIMENSION.
 let grid = makeBlankGrid();
-let sourceGrid = null; // highest-fidelity grid since last import/load, for the color-count slider
-let colorCountMax = 20; // recomputed per-sprite by setColorCountMax() -- how many distinct colors
-// sourceGrid actually has, so the slider's range always matches what's really there instead of a
-// stale fixed ceiling (relevant now that precise/conform imports can bring in far more than 20).
+let sourceGrid = null; // highest-fidelity grid since last import/load: full native resolution and
+// full color count. The pipeline is sourceGrid -> resampleGrid(width, height) -> reduceColors(n)
+// -> grid (painted/rendered/saved) -- see rebuildGridFromSource().
+let colorCountMax = 20; // recomputed per-sprite by setColorCountMax() from sourceGrid's own
+// distinct-color count -- so the slider ceiling doesn't wobble as width/height (and therefore the
+// resampled view's apparent color count) change.
 let painting = false;
 let lastPaintedCell = null;
 let loadedExisting = false;
@@ -57,8 +76,8 @@ let moving = false;
 let moveStart = null; // [clientX, clientY] where a move-tool drag started
 let moveSourceGrid = null; // grid snapshot at drag start, so panning recomputes instead of drifting
 
-function makeBlankGrid() {
-  return Array.from({ length: SIZE }, () => Array(SIZE).fill("."));
+function makeBlankGrid(w = width, h = height) {
+  return Array.from({ length: h }, () => Array(w).fill("."));
 }
 
 function setStatus(text, isError = false) {
@@ -88,8 +107,8 @@ function rgbFor(ch) {
 // ---- rendering ----
 
 function drawGrid() {
-  for (let y = 0; y < SIZE; y++) {
-    for (let x = 0; x < SIZE; x++) {
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
       const ch = grid[y][x];
       if (ch === ".") {
         const light = (x + y) % 2 === 0;
@@ -97,15 +116,15 @@ function drawGrid() {
       } else {
         ctx.fillStyle = hexFor(ch) ?? "#ff00ff";
       }
-      ctx.fillRect(x * CELL, y * CELL, CELL, CELL);
+      ctx.fillRect(x * CELL_PX, y * CELL_PX, CELL_PX, CELL_PX);
     }
   }
 }
 
 function updateCssPreview() {
   const entries = [];
-  for (let y = 0; y < SIZE; y++) {
-    for (let x = 0; x < SIZE; x++) {
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
       const ch = grid[y][x];
       const ref = cssRefFor(ch);
       if (ref) entries.push(`${x}px ${y}px ${ref}`);
@@ -123,9 +142,9 @@ function drawBrushCursor() {
   // Matches paintAt's painted region exactly (same `half` offset), so the ring never drifts
   // half a cell off-center for even brush sizes.
   const half = Math.floor((brushSize - 1) / 2);
-  const px = (cx - half + brushSize / 2) * CELL;
-  const py = (cy - half + brushSize / 2) * CELL;
-  const radius = (brushSize * CELL) / 2;
+  const px = (cx - half + brushSize / 2) * CELL_PX;
+  const py = (cy - half + brushSize / 2) * CELL_PX;
+  const radius = (brushSize * CELL_PX) / 2;
   ctx.save();
   ctx.beginPath();
   ctx.arc(px, py, radius, 0, Math.PI * 2);
@@ -188,11 +207,71 @@ async function loadPalette() {
     el.style.background = entry.hex;
     el.title = `${entry.cssVar} (${entry.hex})`;
     el.addEventListener("click", () => selectChar(entry.char, el));
+
+    const del = document.createElement("button");
+    del.type = "button";
+    del.className = "swatch-delete";
+    del.title = `Delete ${entry.cssVar}`;
+    del.textContent = "×";
+    del.addEventListener("click", (evt) => {
+      evt.stopPropagation();
+      deletePaletteColor(entry);
+    });
+    el.appendChild(del);
+
     paletteEl.appendChild(el);
   }
 }
 
-// This sprite's own colors (beyond the shared 20), from the last import/load -- see
+// Deletes a global palette color via the server (which blocks it if any saved sprite still uses
+// the char, rather than silently orphaning those pixels -- see server.mjs's spriteNamesUsingChar).
+async function deletePaletteColor(entry) {
+  if (!confirm(`Delete ${entry.cssVar} (${entry.hex})? This can't be undone.`)) return;
+  const res = await fetch(`/api/palette/${encodeURIComponent(entry.char)}`, { method: "DELETE" });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const detail = data.sprites ? ` -- used by: ${data.sprites.join(", ")}` : "";
+    setStatus(`Can't delete ${entry.cssVar}: ${data.error || res.status}${detail}`, true);
+    return;
+  }
+  setStatus(`Removed ${entry.cssVar}. Run "npm run build:sprites" to update compiled CSS.`);
+  await loadPalette();
+  refresh();
+}
+
+paletteAddToggleBtn.addEventListener("click", () => {
+  const showing = paletteAddFormEl.style.display !== "none";
+  paletteAddFormEl.style.display = showing ? "none" : "flex";
+});
+
+paletteAddCancelBtn.addEventListener("click", () => {
+  paletteAddFormEl.style.display = "none";
+});
+
+paletteAddConfirmBtn.addEventListener("click", async () => {
+  const hex = paletteAddColorInput.value;
+  const label = paletteAddLabelInput.value.trim();
+  if (!label) {
+    setStatus("Enter a name for the new color.", true);
+    return;
+  }
+  const res = await fetch("/api/palette", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ hex, label }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    setStatus(`Couldn't add color: ${data.error || res.status}`, true);
+    return;
+  }
+  paletteAddLabelInput.value = "";
+  paletteAddFormEl.style.display = "none";
+  setStatus(`Added ${data.cssVar}. Run "npm run build:sprites" to update compiled CSS.`);
+  await loadPalette();
+});
+
+// This sprite's own colors (beyond the shared palette), from the last import/load -- see
 // scripts/lib/pixel-grid.mjs's precise/conform modes. Rebuilds the local swatch row and hides it
 // entirely when there's nothing local to show (e.g. a blank "new" sprite).
 function setLocalPalette(next) {
@@ -220,6 +299,113 @@ function selectChar(char, el) {
   el.classList.add("is-selected");
 }
 
+// ---- dimensions (width/height) ----
+
+// Backing-store canvas size is CELL_PX px per grid cell -- resized whenever width/height change.
+function resizeCanvasBackingStore() {
+  canvas.width = width * CELL_PX;
+  canvas.height = height * CELL_PX;
+}
+
+// Keeps the canvas's displayed (CSS) size in a comfortable range as sprite dimensions vary --
+// picks a viewScale that lands the longer backing-store edge near TARGET_DISPLAY_EDGE, clamped to
+// the same VIEW_SCALE_MIN/MAX the manual Shift+wheel zoom respects.
+function autoFitViewScale() {
+  const longEdge = Math.max(canvas.width, canvas.height);
+  return Math.min(VIEW_SCALE_MAX, Math.max(VIEW_SCALE_MIN, TARGET_DISPLAY_EDGE / longEdge));
+}
+
+// Syncs the width/height number inputs' value and range to current state -- range is capped to
+// sourceGrid's native dims when one exists (can't gain real detail past what was ever captured),
+// or MAX_DIMENSION freely for a blank sprite (pure canvas resize, no resampling ceiling).
+function syncDimensionInputs() {
+  widthInput.min = String(MIN_DIMENSION);
+  widthInput.max = String(sourceCeilingWidth ?? MAX_DIMENSION);
+  widthInput.value = String(width);
+  heightInput.min = String(MIN_DIMENSION);
+  heightInput.max = String(sourceCeilingHeight ?? MAX_DIMENSION);
+  heightInput.value = String(height);
+  dimensionHintEl.textContent =
+    sourceCeilingWidth && sourceCeilingHeight
+      ? `(native: ${sourceCeilingWidth}×${sourceCeilingHeight})`
+      : "";
+}
+
+// Nearest-neighbor spatial resample: given a source grid, produces a new target-size grid by
+// inverse-mapping each destination cell to a source cell. Centered-sample convention
+// ((coord + 0.5) * ratio) avoids directional bias -- deliberately different from maximizeItem's
+// bbox-relative math below, which solves a different problem (placing existing content in a fixed
+// frame, not general resizing). Never introduces new colors, only copies existing chars.
+function resampleGrid(source, targetW, targetH) {
+  const srcH = source.length;
+  const srcW = source[0]?.length ?? 0;
+  if (srcW === 0 || srcH === 0) return makeBlankGrid(targetW, targetH);
+  const next = [];
+  for (let y = 0; y < targetH; y++) {
+    const srcY = Math.min(srcH - 1, Math.floor(((y + 0.5) * srcH) / targetH));
+    const row = [];
+    for (let x = 0; x < targetW; x++) {
+      const srcX = Math.min(srcW - 1, Math.floor(((x + 0.5) * srcW) / targetW));
+      row.push(source[srcY][srcX]);
+    }
+    next.push(row);
+  }
+  return next;
+}
+
+// Rebuilds `grid` from `sourceGrid` through the full pipeline: spatial resample to the current
+// width/height, then color-count reduction. Centralized so width/height changes and color-count
+// slider changes never stomp each other -- both funnel through here.
+function rebuildGridFromSource() {
+  if (!sourceGrid) return;
+  const resampled = resampleGrid(sourceGrid, width, height);
+  grid = reduceColors(resampled, Number.parseInt(colorCountInput.value, 10));
+  refresh();
+}
+
+// Resizes the sprite to newWidth x newHeight, clamped to the current ceiling. For an
+// imported/loaded sprite (sourceGrid exists), this resamples from that high-fidelity source. For
+// a blank "new" sprite (no sourceGrid), it's a pure canvas resize: existing painted cells are
+// preserved anchored top-left, cropping overflow and padding new area transparent.
+function resizeGrid(newWidth, newHeight) {
+  const maxW = sourceCeilingWidth ?? MAX_DIMENSION;
+  const maxH = sourceCeilingHeight ?? MAX_DIMENSION;
+  const clampedW = Number.isFinite(newWidth) ? Math.round(newWidth) : width;
+  const clampedH = Number.isFinite(newHeight) ? Math.round(newHeight) : height;
+  width = Math.min(maxW, Math.max(MIN_DIMENSION, clampedW));
+  height = Math.min(maxH, Math.max(MIN_DIMENSION, clampedH));
+
+  if (!sourceGrid) {
+    const oldGrid = grid;
+    const oldHeight = oldGrid.length;
+    const oldWidth = oldGrid[0]?.length ?? 0;
+    const next = makeBlankGrid();
+    for (let y = 0; y < Math.min(oldHeight, height); y++) {
+      for (let x = 0; x < Math.min(oldWidth, width); x++) {
+        next[y][x] = oldGrid[y][x];
+      }
+    }
+    grid = next;
+  }
+
+  syncDimensionInputs();
+  resizeCanvasBackingStore();
+  setViewScale(autoFitViewScale());
+
+  if (sourceGrid) {
+    rebuildGridFromSource(); // calls refresh()
+  } else {
+    refresh();
+  }
+}
+
+widthInput.addEventListener("change", () => {
+  resizeGrid(Number.parseInt(widthInput.value, 10), height);
+});
+heightInput.addEventListener("change", () => {
+  resizeGrid(width, Number.parseInt(heightInput.value, 10));
+});
+
 // ---- sprite list / load ----
 
 async function loadSpriteList() {
@@ -237,12 +423,19 @@ async function loadSpriteList() {
 spriteSelect.addEventListener("change", async () => {
   const name = spriteSelect.value;
   if (!name) {
-    grid = makeBlankGrid();
+    width = DEFAULT_DIMENSION;
+    height = DEFAULT_DIMENSION;
+    sourceCeilingWidth = null;
+    sourceCeilingHeight = null;
     sourceGrid = null;
+    grid = makeBlankGrid();
     setLocalPalette({});
     nameInput.value = "";
     loadedExisting = false;
     setColorCountMax(20);
+    resizeCanvasBackingStore();
+    setViewScale(autoFitViewScale());
+    syncDimensionInputs();
     refresh();
     return;
   }
@@ -252,12 +445,19 @@ spriteSelect.addEventListener("change", async () => {
     return;
   }
   const data = await res.json();
+  width = data.width;
+  height = data.height;
+  sourceCeilingWidth = data.width;
+  sourceCeilingHeight = data.height;
   grid = data.rows.map((row) => [...row]);
   sourceGrid = grid.map((row) => [...row]);
   setLocalPalette(data.localPalette ?? {});
   nameInput.value = data.name;
   loadedExisting = true;
   setColorCountMax(countDistinctColors(sourceGrid));
+  resizeCanvasBackingStore();
+  setViewScale(autoFitViewScale());
+  syncDimensionInputs();
   setStatus(`Loaded: ${name}`);
   refresh();
 });
@@ -285,6 +485,13 @@ importInput.addEventListener("change", async () => {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "import failed");
+    // The server decodes at the image's native resolution (capped to MAX_DIMENSION on the long
+    // edge) rather than always crushing it to a fixed sprite size, so this is shown at full
+    // resolution first -- shrinking further is a client-side resample (resizeGrid) from here on.
+    width = data.width;
+    height = data.height;
+    sourceCeilingWidth = data.width;
+    sourceCeilingHeight = data.height;
     grid = data.rows.map((row) => [...row]);
     sourceGrid = grid.map((row) => [...row]);
     setLocalPalette(data.localPalette);
@@ -292,12 +499,15 @@ importInput.addEventListener("change", async () => {
     spriteSelect.value = "";
     if (!nameInput.value) nameInput.value = sanitizeName(file.name);
     setColorCountMax(countDistinctColors(sourceGrid));
+    resizeCanvasBackingStore();
+    setViewScale(autoFitViewScale());
+    syncDimensionInputs();
     const localCount = Object.keys(data.localPalette).length;
     const modeLabel = mode === "conform" ? "conform to palette" : "precise";
     setStatus(
       localCount > 0
-        ? `Imported (${modeLabel}) — ${localCount} color(s) unique to this image.`
-        : `Imported (${modeLabel}) — every pixel matched the shared palette.`,
+        ? `Imported (${modeLabel}, ${width}×${height}) — ${localCount} color(s) unique to this image.`
+        : `Imported (${modeLabel}, ${width}×${height}) — every pixel matched the shared palette.`,
     );
     refresh();
   } catch (err) {
@@ -311,7 +521,7 @@ importInput.addEventListener("change", async () => {
 
 function removeBackground() {
   const bgChars = new Set(
-    [grid[0][0], grid[0][SIZE - 1], grid[SIZE - 1][0], grid[SIZE - 1][SIZE - 1]].filter(
+    [grid[0][0], grid[0][width - 1], grid[height - 1][0], grid[height - 1][width - 1]].filter(
       (c) => c !== ".",
     ),
   );
@@ -320,8 +530,8 @@ function removeBackground() {
     return;
   }
   let count = 0;
-  for (let y = 0; y < SIZE; y++) {
-    for (let x = 0; x < SIZE; x++) {
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
       if (bgChars.has(grid[y][x])) {
         grid[y][x] = ".";
         count++;
@@ -337,12 +547,12 @@ removeBgBtn.addEventListener("click", removeBackground);
 // ---- maximize (scale content to fill the frame, proportions locked) ----
 
 function contentBBox() {
-  let minX = SIZE;
-  let minY = SIZE;
+  let minX = width;
+  let minY = height;
   let maxX = -1;
   let maxY = -1;
-  for (let y = 0; y < SIZE; y++) {
-    for (let x = 0; x < SIZE; x++) {
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
       if (grid[y][x] === ".") continue;
       if (x < minX) minX = x;
       if (x > maxX) maxX = x;
@@ -362,7 +572,7 @@ function maximizeItem() {
   const { minX, minY, maxX, maxY } = bbox;
   const contentWidth = maxX - minX + 1;
   const contentHeight = maxY - minY + 1;
-  if (contentWidth === SIZE && contentHeight === SIZE) {
+  if (contentWidth === width && contentHeight === height) {
     setStatus("The drawing already fills the whole frame.");
     return;
   }
@@ -370,17 +580,18 @@ function maximizeItem() {
   // scale, so the content grows as much as possible without stretching either axis differently
   // (locks proportions, per the ask). Inverse (destination -> source) mapping, same technique as
   // the sprite-scale/brush math elsewhere in this file, avoids sampling holes when scaling up.
-  const scale = Math.min(SIZE / contentWidth, SIZE / contentHeight);
+  const scale = Math.min(width / contentWidth, height / contentHeight);
   const contentCenterX = (minX + maxX) / 2;
   const contentCenterY = (minY + maxY) / 2;
-  const frameCenter = (SIZE - 1) / 2;
+  const frameCenterX = (width - 1) / 2;
+  const frameCenterY = (height - 1) / 2;
   const source = grid;
   const next = makeBlankGrid();
-  for (let y = 0; y < SIZE; y++) {
-    for (let x = 0; x < SIZE; x++) {
-      const srcX = Math.round((x - frameCenter) / scale + contentCenterX);
-      const srcY = Math.round((y - frameCenter) / scale + contentCenterY);
-      if (srcX >= 0 && srcX < SIZE && srcY >= 0 && srcY < SIZE) {
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const srcX = Math.round((x - frameCenterX) / scale + contentCenterX);
+      const srcY = Math.round((y - frameCenterY) / scale + contentCenterY);
+      if (srcX >= 0 && srcX < width && srcY >= 0 && srcY < height) {
         next[y][x] = source[srcY][srcX];
       }
     }
@@ -404,9 +615,9 @@ function setTool(next) {
 
 function cellFromEvent(evt) {
   const rect = canvas.getBoundingClientRect();
-  const x = Math.floor(((evt.clientX - rect.left) / rect.width) * SIZE);
-  const y = Math.floor(((evt.clientY - rect.top) / rect.height) * SIZE);
-  if (x < 0 || x >= SIZE || y < 0 || y >= SIZE) return null;
+  const x = Math.floor(((evt.clientX - rect.left) / rect.width) * width);
+  const y = Math.floor(((evt.clientY - rect.top) / rect.height) * height);
+  if (x < 0 || x >= width || y < 0 || y >= height) return null;
   return [x, y];
 }
 
@@ -420,26 +631,26 @@ function paintAt(evt) {
   const half = Math.floor((brushSize - 1) / 2);
   for (let dy = 0; dy < brushSize; dy++) {
     const y = cy - half + dy;
-    if (y < 0 || y >= SIZE) continue;
+    if (y < 0 || y >= height) continue;
     for (let dx = 0; dx < brushSize; dx++) {
       const x = cx - half + dx;
-      if (x < 0 || x >= SIZE) continue;
+      if (x < 0 || x >= width) continue;
       grid[y][x] = selectedChar;
     }
   }
   refresh();
 }
 
-// ---- move tool (pan the drawing within the fixed 64x64 frame) ----
+// ---- move tool (pan the drawing within the fixed-size frame) ----
 
 function shiftGrid(source, dx, dy) {
   const next = makeBlankGrid();
-  for (let y = 0; y < SIZE; y++) {
+  for (let y = 0; y < height; y++) {
     const srcY = y - dy;
-    if (srcY < 0 || srcY >= SIZE) continue;
-    for (let x = 0; x < SIZE; x++) {
+    if (srcY < 0 || srcY >= height) continue;
+    for (let x = 0; x < width; x++) {
       const srcX = x - dx;
-      if (srcX < 0 || srcX >= SIZE) continue;
+      if (srcX < 0 || srcX >= width) continue;
       next[y][x] = source[srcY][srcX];
     }
   }
@@ -469,8 +680,8 @@ canvas.addEventListener("mousemove", (evt) => {
 window.addEventListener("mousemove", (evt) => {
   if (!moving) return;
   const rect = canvas.getBoundingClientRect();
-  const dx = Math.round(((evt.clientX - moveStart[0]) / rect.width) * SIZE);
-  const dy = Math.round(((evt.clientY - moveStart[1]) / rect.height) * SIZE);
+  const dx = Math.round(((evt.clientX - moveStart[0]) / rect.width) * width);
+  const dy = Math.round(((evt.clientY - moveStart[1]) / rect.height) * height);
   grid = shiftGrid(moveSourceGrid, dx, dy);
   refresh();
 });
@@ -527,9 +738,8 @@ brushSizeInput.addEventListener("input", () =>
 
 function setViewScale(scale) {
   viewScale = Math.min(VIEW_SCALE_MAX, Math.max(VIEW_SCALE_MIN, scale));
-  const displaySize = Math.round(BASE_DISPLAY_SIZE * viewScale);
-  canvas.style.width = `${displaySize}px`;
-  canvas.style.height = `${displaySize}px`;
+  canvas.style.width = `${Math.round(canvas.width * viewScale)}px`;
+  canvas.style.height = `${Math.round(canvas.height * viewScale)}px`;
   setStatus(`Zoom: ${Math.round(viewScale * 100)}%`);
 }
 
@@ -547,8 +757,9 @@ function countDistinctColors(sourceGridToCount) {
 
 // The slider's ceiling is however many distinct colors the current sprite actually has (global +
 // local combined), not a fixed constant -- precise/conform imports can bring in far more than the
-// 20 shared tokens, and a stale fixed cap would silently prevent "no reduction" from meaning
-// "no reduction."
+// shared tokens, and a stale fixed cap would silently prevent "no reduction" from meaning
+// "no reduction." Stays derived from sourceGrid's own color count (not the resampled view's), so
+// the ceiling doesn't wobble as width/height change.
 function setColorCountMax(max) {
   colorCountMax = Math.max(COLOR_COUNT_MIN, max);
   colorCountInput.max = String(colorCountMax);
@@ -561,16 +772,15 @@ function setColorCount(n) {
   colorCountValueEl.textContent = `${clamped} colors`;
 }
 
-function applyColorCount(n) {
-  if (!sourceGrid) return;
-  if (n >= colorCountMax) {
-    grid = sourceGrid.map((row) => [...row]);
-    refresh();
-    return;
-  }
+// Reduces sourceRows to its N most-used colors, remapping every other pixel to its nearest kept
+// neighbor. Pure function of (sourceRows, n) -- doesn't touch `grid`/`sourceGrid` state, so
+// rebuildGridFromSource() can layer this on top of a spatial resample without the two transforms
+// stomping each other.
+function reduceColors(sourceRows, n) {
+  if (n >= colorCountMax) return sourceRows.map((row) => [...row]);
 
   const counts = new Map();
-  for (const row of sourceGrid) {
+  for (const row of sourceRows) {
     for (const ch of row) {
       if (ch === ".") continue;
       counts.set(ch, (counts.get(ch) ?? 0) + 1);
@@ -598,20 +808,19 @@ function applyColorCount(n) {
   };
   const remap = new Map();
 
-  grid = sourceGrid.map((row) =>
+  return sourceRows.map((row) =>
     row.map((ch) => {
       if (ch === "." || keptSet.has(ch)) return ch;
       if (!remap.has(ch)) remap.set(ch, nearestKept(ch));
       return remap.get(ch);
     }),
   );
-  refresh();
 }
 
 colorCountInput.addEventListener("input", () => {
   const n = Number.parseInt(colorCountInput.value, 10);
   colorCountValueEl.textContent = `${n} colors`;
-  applyColorCount(n);
+  rebuildGridFromSource();
 });
 
 // ---- keyboard shortcuts ----
@@ -662,7 +871,7 @@ async function saveSprite(overwrite) {
   const res = await fetch(`/api/sprites/${encodeURIComponent(name)}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ width: SIZE, height: SIZE, rows, overwrite, localPalette }),
+    body: JSON.stringify({ width, height, rows, overwrite, localPalette }),
   });
 
   if (res.status === 409) {
@@ -689,5 +898,8 @@ saveBtn.addEventListener("click", () => saveSprite(loadedExisting));
   await loadSpriteList();
   setBrushSize(brushSize);
   setColorCountMax(20);
+  resizeCanvasBackingStore();
+  setViewScale(autoFitViewScale());
+  syncDimensionInputs();
   refresh();
 })();

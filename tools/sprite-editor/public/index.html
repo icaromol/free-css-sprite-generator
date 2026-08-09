@@ -34,6 +34,18 @@
           </label>
         </div>
 
+        <div class="row">
+          <label>
+            Width:
+            <input type="number" id="sprite-width" min="8" max="256" value="64" />
+          </label>
+          <label>
+            Height:
+            <input type="number" id="sprite-height" min="8" max="256" value="64" />
+          </label>
+          <span id="dimension-hint" class="hint"></span>
+        </div>
+
         <canvas id="grid-canvas" width="512" height="512"></canvas>
 
         <div class="row">
@@ -76,6 +88,16 @@
       <section class="panel panel--palette">
         <h2>Palette</h2>
         <div id="palette-swatches" class="swatches"></div>
+
+        <div class="row">
+          <button id="palette-add-toggle" type="button" class="secondary-btn">+ Add color</button>
+        </div>
+        <div id="palette-add-form" class="row" style="display: none">
+          <input type="color" id="palette-add-color" value="#888888" />
+          <input type="text" id="palette-add-label" placeholder="Color name" maxlength="60" />
+          <button id="palette-add-confirm" type="button">Add</button>
+          <button id="palette-add-cancel" type="button" class="secondary-btn">Cancel</button>
+        </div>
 
         <div id="local-palette-section" style="display: none">
           <h2>Image colors</h2>

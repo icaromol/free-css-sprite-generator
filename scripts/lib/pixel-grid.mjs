@@ -9,6 +9,14 @@ import sharp from "sharp";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 export const ART_DIR = join(ROOT, "art");
+export const LEGEND_PATH = join(ART_DIR, "legend.json");
+export const PALETTE_HEX_PATH = join(ART_DIR, "palette.hex");
+
+// Sprite pixel-dimension bounds, shared by server.mjs's save/import validation. 8px keeps a grid
+// meaningful; 256px caps a sprite at 65,536 box-shadow entries -- the practical ceiling before
+// CSS painting gets heavy.
+export const MIN_DIMENSION = 8;
+export const MAX_DIMENSION = 256;
 
 function hexToRgb(hex) {
   const n = Number.parseInt(hex.slice(1), 16);
@@ -23,8 +31,8 @@ function rgbToHex(r, g, b) {
 // fourth copy. art/legend.json's key order (excluding "_comment" and ".") must match
 // art/palette.hex's line order; both are hand-maintained together, see README.md.
 function loadPaletteEntries() {
-  const legend = JSON.parse(readFileSync(join(ART_DIR, "legend.json"), "utf8"));
-  const hexLines = readFileSync(join(ART_DIR, "palette.hex"), "utf8")
+  const legend = JSON.parse(readFileSync(LEGEND_PATH, "utf8"));
+  const hexLines = readFileSync(PALETTE_HEX_PATH, "utf8")
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean);
@@ -40,9 +48,14 @@ function loadPaletteEntries() {
   });
 }
 
-export const PALETTE_ENTRIES = loadPaletteEntries();
-
-const EXACT_GLOBAL_MATCH = new Map(PALETTE_ENTRIES.map((e) => [e.rgb.join(","), e.char]));
+// PALETTE_ENTRIES and everything derived from it below are mutable and recomputed by
+// reloadPaletteFromDisk() (see computeDerivedPaletteState() further down) -- the sprite editor's
+// palette add/delete endpoints rewrite legend.json/palette.hex on disk, and every consumer in
+// this long-lived server process needs to see that without a restart. ES module named imports are
+// live bindings, so `export let` here is enough for server.mjs's `import { PALETTE_ENTRIES }` to
+// reflect a reload automatically.
+export let PALETTE_ENTRIES;
+let EXACT_GLOBAL_MATCH;
 
 // ---- HSL helpers, used only by "conform" mode's hue-family recolor ----
 
@@ -94,13 +107,9 @@ function hslToRgb(h, s, l) {
 // noise for near-gray colors).
 const CONFORM_EXCLUDE = new Set(["--color-bg", "--color-bg-raised"]);
 const CONFORM_ACHROMATIC_VARS = new Set(["--color-ink", "--color-highlight", "--color-taupe"]);
-const CONFORM_CHROMATIC_TARGETS = PALETTE_ENTRIES.filter(
-  (e) => !CONFORM_EXCLUDE.has(e.cssVar) && !CONFORM_ACHROMATIC_VARS.has(e.cssVar),
-).map((e) => ({ ...e, hsl: rgbToHsl(...e.rgb) }));
-const CONFORM_ACHROMATIC_TARGETS = PALETTE_ENTRIES.filter((e) =>
-  CONFORM_ACHROMATIC_VARS.has(e.cssVar),
-).map((e) => ({ ...e, hsl: rgbToHsl(...e.rgb) }));
 const GRAYSCALE_SATURATION_THRESHOLD = 0.15;
+let CONFORM_CHROMATIC_TARGETS;
+let CONFORM_ACHROMATIC_TARGETS;
 
 // Recolors one pixel to the nearest palette family's hue/saturation while keeping the pixel's
 // own lightness (clamped so it never goes fully white/black and loses visibility) -- generates
@@ -139,10 +148,33 @@ function conformPixel(r, g, b) {
 // in art/legend.json (currently `.bBiHuUsSkmgGfFdpPcCw` -- see that file). Plenty for a typical
 // stylized import; imageInputToGrid falls back to frequency-reducing the color count if a source
 // ever has more distinct colors than this pool (see reduceToFit below).
-const GLOBAL_CHARS = new Set(PALETTE_ENTRIES.map((e) => e.char));
-const LOCAL_CHAR_POOL = "aejlnoqrtvxyzADEHIJKLMNOQRTVXYZ0123456789"
-  .split("")
-  .filter((c) => !GLOBAL_CHARS.has(c));
+const LOCAL_CHAR_POOL_SOURCE = "aejlnoqrtvxyzADEHIJKLMNOQRTVXYZ0123456789";
+let GLOBAL_CHARS;
+let LOCAL_CHAR_POOL;
+let LEGEND_CSS_VAR;
+
+// Recomputes every value derived from legend.json/palette.hex -- called once at module load and
+// again by reloadPaletteFromDisk() after the sprite editor's palette add/delete endpoints rewrite
+// those two files, so a long-lived server process picks up the change without a restart.
+function computeDerivedPaletteState() {
+  PALETTE_ENTRIES = loadPaletteEntries();
+  EXACT_GLOBAL_MATCH = new Map(PALETTE_ENTRIES.map((e) => [e.rgb.join(","), e.char]));
+  GLOBAL_CHARS = new Set(PALETTE_ENTRIES.map((e) => e.char));
+  LOCAL_CHAR_POOL = LOCAL_CHAR_POOL_SOURCE.split("").filter((c) => !GLOBAL_CHARS.has(c));
+  CONFORM_CHROMATIC_TARGETS = PALETTE_ENTRIES.filter(
+    (e) => !CONFORM_EXCLUDE.has(e.cssVar) && !CONFORM_ACHROMATIC_VARS.has(e.cssVar),
+  ).map((e) => ({ ...e, hsl: rgbToHsl(...e.rgb) }));
+  CONFORM_ACHROMATIC_TARGETS = PALETTE_ENTRIES.filter((e) =>
+    CONFORM_ACHROMATIC_VARS.has(e.cssVar),
+  ).map((e) => ({ ...e, hsl: rgbToHsl(...e.rgb) }));
+  LEGEND_CSS_VAR = new Map(PALETTE_ENTRIES.map((e) => [e.char, e.cssVar]));
+}
+
+computeDerivedPaletteState();
+
+export function reloadPaletteFromDisk() {
+  computeDerivedPaletteState();
+}
 
 function makeLocalPaletteAssigner() {
   const charByRgbKey = new Map();
@@ -166,17 +198,38 @@ function makeLocalPaletteAssigner() {
   };
 }
 
-// Full pipeline: fit the whole input into size x size (nearest-neighbor, aspect-ratio preserved,
-// transparent letterbox padding -- never crops, never distorts) -> color each pixel per
-// `colorMode` -> return a grid + whatever local palette entries it needed. No auto-crop, no
+// Reads just the source image's own pixel dimensions and scales them down (aspect-ratio
+// preserved) so the longer edge fits within `maxDimension` -- used by the sprite editor's import
+// endpoint to show an imported image at its full/native resolution (up to that cap) instead of
+// always crushing it down to a fixed sprite size first.
+export async function nativeGridDimensions(input, { maxDimension = MAX_DIMENSION } = {}) {
+  const { width, height } = await sharp(input).metadata();
+  const longEdge = Math.max(width, height);
+  const scale = longEdge > maxDimension ? maxDimension / longEdge : 1;
+  return {
+    width: Math.max(MIN_DIMENSION, Math.round(width * scale)),
+    height: Math.max(MIN_DIMENSION, Math.round(height * scale)),
+  };
+}
+
+// Full pipeline: fit the whole input into width x height (nearest-neighbor, aspect-ratio
+// preserved, transparent letterbox padding -- never crops, never distorts) -> color each pixel
+// per `colorMode` -> return a grid + whatever local palette entries it needed. No auto-crop, no
 // automatic background-color removal (both were footguns that clipped/mis-detected real content
 // on some sources -- see the pipeline comments below); background removal is now an explicit, separate,
 // user-triggered action in the sprite editor instead of an automatic import step.
 // `input` is anything sharp() accepts: a file path string, or a Buffer (e.g. an upload body).
-export async function imageInputToGrid(input, { size = 64, colorMode = "precise" } = {}) {
+// `size` is a square-target shorthand (used by the CLI's `--size=N`); pass `width`/`height`
+// directly for independent (or non-square) dimensions -- they take priority over `size`.
+export async function imageInputToGrid(
+  input,
+  { size = 64, width, height, colorMode = "precise" } = {},
+) {
+  const targetWidth = width ?? size;
+  const targetHeight = height ?? size;
   const resized = await sharp(input)
     .ensureAlpha()
-    .resize(size, size, {
+    .resize(targetWidth, targetHeight, {
       kernel: sharp.kernel.nearest,
       fit: "contain",
       background: { r: 0, g: 0, b: 0, alpha: 0 },
@@ -334,8 +387,6 @@ export function spritePathFor(name) {
   if (!resolved.startsWith(ART_DIR + sep)) return null;
   return resolved;
 }
-
-const LEGEND_CSS_VAR = new Map(PALETTE_ENTRIES.map((e) => [e.char, e.cssVar]));
 
 // Converts a { rows, localPalette } grid into an ordered list of box-shadow entries, one per
 // non-transparent pixel. Global-palette pixels use `var(--color-x)` (one edit point restyles
