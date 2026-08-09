@@ -1,0 +1,30 @@
+{
+  "name": "free-css-sprite-generator",
+  "version": "1.0.0",
+  "description": "A local pixel-art sprite editor and CLI that converts images into pure-CSS box-shadow sprites -- no raster images, no canvas, no SVG.",
+  "private": true,
+  "license": "MIT",
+  "scripts": {
+    "format": "biome format --write .",
+    "lint": "biome lint .",
+    "check": "biome check .",
+    "check:fix": "biome check --write .",
+    "grid:from-png": "node scripts/png-to-grid.mjs",
+    "build:sprites": "node scripts/build-sprites.mjs",
+    "sprite-editor": "node tools/sprite-editor/server.mjs",
+    "prepare": "husky"
+  },
+  "keywords": [
+    "css",
+    "pixel-art",
+    "sprite-editor",
+    "box-shadow",
+    "css-art"
+  ],
+  "devDependencies": {
+    "@biomejs/biome": "2.5.7",
+    "husky": "^9.1.7",
+    "pngjs": "7.0.0",
+    "sharp": "0.35.3"
+  }
+}

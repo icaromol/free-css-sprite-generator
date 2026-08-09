@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Free CSS Sprite Generator — editor</title>
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <h1>Free CSS Sprite Generator</h1>
+      <p>Local tool — draw/edit <code>art/*.json</code> pixel-grid sprites, save straight to disk.</p>
+    </header>
+
+    <main class="layout">
+      <section class="panel panel--canvas">
+        <div class="row">
+          <label class="file-btn">
+            Import image
+            <input type="file" id="import-input" accept="image/*" hidden />
+          </label>
+          <label>
+            Import colors:
+            <select id="import-mode">
+              <option value="precise" selected>Precise (exact color)</option>
+              <option value="conform">Conform to palette</option>
+            </select>
+          </label>
+          <label>
+            Existing sprite:
+            <select id="sprite-select">
+              <option value="">— new —</option>
+            </select>
+          </label>
+        </div>
+
+        <canvas id="grid-canvas" width="512" height="512"></canvas>
+
+        <div class="row">
+          <label>
+            Brush/eraser size:
+            <input type="range" id="brush-size" min="1" max="8" step="1" value="1" />
+            <span id="brush-size-value">1px</span>
+          </label>
+          <span class="hint">[ / ] brush size · E: eraser · M: move · Shift+wheel: zoom</span>
+        </div>
+
+        <div class="row">
+          <button id="remove-bg-btn" type="button" class="secondary-btn">Remove background</button>
+          <span class="hint">Clears the drawing's 4 corner colors, if needed.</span>
+        </div>
+
+        <div class="row">
+          <button id="maximize-btn" type="button" class="secondary-btn">Maximize item</button>
+          <span class="hint">Scales the drawing to the largest size that fits, without distorting it.</span>
+        </div>
+
+        <div class="row">
+          <label>
+            Simplify colors:
+            <input type="range" id="color-count" min="2" max="15" step="1" value="15" />
+            <span id="color-count-value">15 colors</span>
+          </label>
+        </div>
+
+        <div class="row">
+          <label>
+            Sprite name:
+            <input type="text" id="sprite-name" placeholder="e.g. campfire" />
+          </label>
+          <button id="save-btn" type="button">Save</button>
+          <span id="status" role="status"></span>
+        </div>
+      </section>
+
+      <section class="panel panel--palette">
+        <h2>Palette</h2>
+        <div id="palette-swatches" class="swatches"></div>
+
+        <div id="local-palette-section" style="display: none">
+          <h2>Image colors</h2>
+          <div id="local-swatches" class="swatches"></div>
+        </div>
+
+        <h2>CSS preview</h2>
+        <pre id="css-preview" class="css-preview"></pre>
+      </section>
+    </main>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>
