@@ -20,20 +20,25 @@
             <input type="text" id="sprite-name" placeholder="e.g. campfire" />
           </label>
           <button id="save-btn" type="button">Save</button>
-          <button id="export-toggle" type="button" class="secondary-btn">Export as ▾</button>
+          <select id="export-select" title="Export as...">
+            <option value="" selected>Export as…</option>
+            <option value="all">All (JSON + PNG + WebP + SCSS)</option>
+            <option value="json">JSON</option>
+            <option value="png">PNG</option>
+            <option value="webp">WebP</option>
+            <option value="scss">SCSS</option>
+          </select>
           <span id="status" role="status"></span>
-        </div>
-        <div id="export-menu" class="row" style="display: none">
-          <button id="export-json-btn" type="button" class="secondary-btn">JSON</button>
-          <button id="export-png-btn" type="button" class="secondary-btn">PNG</button>
-          <button id="export-webp-btn" type="button" class="secondary-btn">WebP</button>
-          <button id="export-scss-btn" type="button" class="secondary-btn">SCSS</button>
         </div>
 
         <div class="row">
-          <label class="file-btn">
-            Import image
-            <input type="file" id="import-input" accept="image/*" hidden />
+          <label class="file-btn" title="Replace this sprite's art with a new image, keeping its current name">
+            Replace
+            <input type="file" id="import-replace-input" accept="image/*" hidden />
+          </label>
+          <label class="file-btn" title="Import a new sprite from an image, named after the file">
+            Import new
+            <input type="file" id="import-new-input" accept="image/*" hidden />
           </label>
           <label>
             Import colors:

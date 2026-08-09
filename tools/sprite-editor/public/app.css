@@ -168,7 +168,10 @@ button:hover {
 
 .swatches {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  /* Responsive column count: shrinks toward 1 column as the panel narrows (each swatch never
+     drops below 40px), grows toward 10 as it widens (each track's minimum is also clamped to
+     1/10th of the row's width, so an 11th column can never fit). */
+  grid-template-columns: repeat(auto-fill, minmax(max(40px, calc(100% / 10)), 1fr));
   gap: 6px;
   margin-bottom: 16px;
 }

@@ -28,7 +28,8 @@ const cssPreviewEl = document.getElementById("css-preview");
 const spriteSelect = document.getElementById("sprite-select");
 const nameInput = document.getElementById("sprite-name");
 const saveBtn = document.getElementById("save-btn");
-const importInput = document.getElementById("import-input");
+const importReplaceInput = document.getElementById("import-replace-input");
+const importNewInput = document.getElementById("import-new-input");
 const importModeSelect = document.getElementById("import-mode");
 const removeBgBtn = document.getElementById("remove-bg-btn");
 const maximizeBtn = document.getElementById("maximize-btn");
@@ -49,12 +50,7 @@ const paletteAddConfirmBtn = document.getElementById("palette-add-confirm");
 const paletteAddCancelBtn = document.getElementById("palette-add-cancel");
 const zoomInput = document.getElementById("view-zoom");
 const zoomValueEl = document.getElementById("view-zoom-value");
-const exportToggleBtn = document.getElementById("export-toggle");
-const exportMenuEl = document.getElementById("export-menu");
-const exportJsonBtn = document.getElementById("export-json-btn");
-const exportPngBtn = document.getElementById("export-png-btn");
-const exportWebpBtn = document.getElementById("export-webp-btn");
-const exportScssBtn = document.getElementById("export-scss-btn");
+const exportSelect = document.getElementById("export-select");
 
 let globalPalette = []; // [{ char, hex, cssVar, rgb }] -- the shared tokens, from /api/palette
 let globalHexByChar = new Map();
@@ -353,11 +349,14 @@ function availablePresets() {
 function syncSizeSlider() {
   const presets = availablePresets();
   sizeInput.max = String(presets.length - 1);
-  const found = presets.findIndex((p) => p >= width);
+  const longEdge = Math.max(width, height);
+  const found = presets.findIndex((p) => p >= longEdge);
   const idx = found === -1 ? presets.length - 1 : found;
   sizeInput.value = String(idx);
   sizeValueEl.textContent = `${presets[idx]}px`;
-  dimensionHintEl.textContent = sourceCeiling ? `(native: ${sourceCeiling}×${sourceCeiling})` : "";
+  dimensionHintEl.textContent = sourceGrid
+    ? `(native: ${sourceGrid[0]?.length ?? 0}×${sourceGrid.length})`
+    : "";
 }
 
 // Nearest-neighbor spatial resample: given a source grid, produces a new target-size grid by
@@ -393,17 +392,24 @@ function rebuildGridFromSource() {
   refresh();
 }
 
-// Resizes the sprite to a newSize x newSize square, clamped to the current ceiling. For an
-// imported/loaded sprite (sourceGrid exists), this resamples from that high-fidelity source. For
-// a blank "new" sprite (no sourceGrid), it's a pure canvas resize: existing painted cells are
-// preserved anchored top-left, cropping overflow and padding new area transparent. Does NOT touch
-// the slider's own DOM state -- callers driven by the slider's drag already reflect the position
-// the user chose; callers elsewhere (sprite switch/load/import/init) call syncSizeSlider() too.
+// Resizes the sprite so its LONGER edge becomes newSize, clamped to the current ceiling -- the
+// shorter edge scales by the same ratio, preserving whatever aspect ratio the sprite currently
+// has (a square sprite's width/height stay equal; a non-square one, e.g. from Fit to art or a
+// loaded legacy sprite, keeps its proportions instead of being squashed to newSize x newSize).
+// For an imported/loaded sprite (sourceGrid exists), this resamples from that high-fidelity
+// source. For a blank "new" sprite (no sourceGrid), it's a pure canvas resize: existing painted
+// cells are preserved anchored top-left, cropping overflow and padding new area transparent. Does
+// NOT touch the slider's own DOM state -- callers driven by the slider's drag already reflect the
+// position the user chose; callers elsewhere (sprite switch/load/import/init) call
+// syncSizeSlider() too.
 function resizeGrid(newSize) {
   const ceiling = sourceCeiling ?? MAX_DIMENSION;
-  const clamped = Number.isFinite(newSize) ? Math.round(newSize) : width;
-  width = Math.min(ceiling, Math.max(MIN_DIMENSION, clamped));
-  height = width;
+  const currentLongEdge = Math.max(width, height);
+  const clamped = Number.isFinite(newSize) ? Math.round(newSize) : currentLongEdge;
+  const targetLongEdge = Math.min(ceiling, Math.max(MIN_DIMENSION, clamped));
+  const scale = targetLongEdge / currentLongEdge;
+  width = Math.max(MIN_DIMENSION, Math.round(width * scale));
+  height = Math.max(MIN_DIMENSION, Math.round(height * scale));
   hasUnsavedChanges = true;
 
   if (!sourceGrid) {
@@ -516,11 +522,12 @@ function sanitizeName(raw) {
     .slice(0, 64);
 }
 
-importInput.addEventListener("change", async () => {
-  const file = importInput.files[0];
-  if (!file) return;
+// Shared by both import buttons. `asNew: true` (the "Import new" button) starts a fresh sprite
+// named after the file, deselecting whatever was loaded; `asNew: false` (the "Replace" button)
+// swaps in the new image's art under the CURRENT sprite's name/identity, leaving nameInput and
+// the sprite dropdown selection untouched -- so Save still overwrites the same sprite.
+async function performImport(file, { asNew }) {
   if (hasUnsavedChanges && !confirm("You have unsaved changes. Discard them and import anyway?")) {
-    importInput.value = "";
     return;
   }
   const mode = importModeSelect.value === "conform" ? "conform" : "precise";
@@ -541,11 +548,13 @@ importInput.addEventListener("change", async () => {
     grid = data.rows.map((row) => [...row]);
     sourceGrid = grid.map((row) => [...row]);
     setLocalPalette(data.localPalette);
-    loadedExisting = false;
     hasUnsavedChanges = true;
-    spriteSelect.value = "";
-    currentSpriteSelection = "";
-    if (!nameInput.value) nameInput.value = sanitizeName(file.name);
+    if (asNew) {
+      loadedExisting = false;
+      spriteSelect.value = "";
+      currentSpriteSelection = "";
+      nameInput.value = sanitizeName(file.name);
+    }
     setColorCountMax(countDistinctColors(sourceGrid));
     resizeCanvasBackingStore();
     setViewScale(autoFitViewScale());
@@ -560,9 +569,18 @@ importInput.addEventListener("change", async () => {
     refresh();
   } catch (err) {
     setStatus(`Import error: ${err.message}`, true);
-  } finally {
-    importInput.value = "";
   }
+}
+
+importReplaceInput.addEventListener("change", async () => {
+  const file = importReplaceInput.files[0];
+  if (file) await performImport(file, { asNew: false });
+  importReplaceInput.value = "";
+});
+importNewInput.addEventListener("change", async () => {
+  const file = importNewInput.files[0];
+  if (file) await performImport(file, { asNew: true });
+  importNewInput.value = "";
 });
 
 // ---- remove background (manual, on demand -- see the pipeline comments below) ----
@@ -1045,25 +1063,36 @@ async function exportAs(format, overwrite = false) {
   setStatus(`Exported: ${data.path}`);
 }
 
-exportToggleBtn.addEventListener("click", () => {
-  const showing = exportMenuEl.style.display !== "none";
-  exportMenuEl.style.display = showing ? "none" : "flex";
-});
-exportJsonBtn.addEventListener("click", () => {
-  exportMenuEl.style.display = "none";
-  saveSprite(loadedExisting);
-});
-exportPngBtn.addEventListener("click", () => {
-  exportMenuEl.style.display = "none";
-  exportAs("png");
-});
-exportWebpBtn.addEventListener("click", () => {
-  exportMenuEl.style.display = "none";
-  exportAs("webp");
-});
-exportScssBtn.addEventListener("click", () => {
-  exportMenuEl.style.display = "none";
-  exportAs("scss");
+// Runs Save (JSON) and all three exports back to back -- each still goes through its own
+// overwrite-confirm flow (saveSprite/exportAs above) if a file by that name already exists, so
+// this can prompt up to four times, same as clicking each one individually would.
+async function exportAllFormats() {
+  const name = nameInput.value.trim();
+  if (!SPRITE_NAME_RE.test(name)) {
+    setStatus("Invalid name — use lowercase letters, numbers, and hyphens.", true);
+    return;
+  }
+  await saveSprite(loadedExisting);
+  await exportAs("png");
+  await exportAs("webp");
+  await exportAs("scss");
+  setStatus(`Saved + exported: art/${name}.json, exports/${name}.{png,webp,scss}`);
+}
+
+// Used as a one-shot action trigger rather than a persistent choice -- it always snaps back to
+// the "Export as…" placeholder right after firing, so it's never left showing e.g. "PNG" as if
+// that were the current state.
+exportSelect.addEventListener("change", async () => {
+  const format = exportSelect.value;
+  exportSelect.value = "";
+  if (!format) return;
+  if (format === "all") {
+    await exportAllFormats();
+  } else if (format === "json") {
+    await saveSprite(loadedExisting);
+  } else {
+    await exportAs(format);
+  }
 });
 
 // ---- warn before leaving with unsaved changes ----
