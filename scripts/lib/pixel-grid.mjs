@@ -11,6 +11,10 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 export const ART_DIR = join(ROOT, "art");
 export const LEGEND_PATH = join(ART_DIR, "legend.json");
 export const PALETTE_HEX_PATH = join(ART_DIR, "palette.hex");
+// Standalone exports (PNG/WebP/SCSS) from the sprite editor's "Export as" feature -- deliberately
+// separate from ART_DIR (the JSON source of truth) and styles/sprites/ (build-sprites.mjs's
+// generated pipeline output), so an export can never be mistaken for either.
+export const EXPORTS_DIR = join(ROOT, "exports");
 
 // Sprite pixel-dimension bounds, shared by server.mjs's save/import validation. 8px keeps a grid
 // meaningful; 256px caps a sprite at 65,536 box-shadow entries -- the practical ceiling before
@@ -198,38 +202,27 @@ function makeLocalPaletteAssigner() {
   };
 }
 
-// Reads just the source image's own pixel dimensions and scales them down (aspect-ratio
-// preserved) so the longer edge fits within `maxDimension` -- used by the sprite editor's import
-// endpoint to show an imported image at its full/native resolution (up to that cap) instead of
-// always crushing it down to a fixed sprite size first.
-export async function nativeGridDimensions(input, { maxDimension = MAX_DIMENSION } = {}) {
+// Reads just the source image's own pixel dimensions and returns the single square grid size
+// that should hold it at full resolution: its longer edge, capped at `maxDimension`. Used by the
+// sprite editor's import endpoint to show an imported image at its full/native resolution (up to
+// that cap) instead of always crushing it down to a fixed sprite size first -- imageInputToGrid
+// below then letterboxes the (possibly non-square) source into that square, same as it always has.
+export async function nativeGridSize(input, { maxDimension = MAX_DIMENSION } = {}) {
   const { width, height } = await sharp(input).metadata();
-  const longEdge = Math.max(width, height);
-  const scale = longEdge > maxDimension ? maxDimension / longEdge : 1;
-  return {
-    width: Math.max(MIN_DIMENSION, Math.round(width * scale)),
-    height: Math.max(MIN_DIMENSION, Math.round(height * scale)),
-  };
+  return Math.max(MIN_DIMENSION, Math.min(maxDimension, Math.max(width, height)));
 }
 
-// Full pipeline: fit the whole input into width x height (nearest-neighbor, aspect-ratio
-// preserved, transparent letterbox padding -- never crops, never distorts) -> color each pixel
-// per `colorMode` -> return a grid + whatever local palette entries it needed. No auto-crop, no
+// Full pipeline: fit the whole input into size x size (nearest-neighbor, aspect-ratio preserved,
+// transparent letterbox padding -- never crops, never distorts) -> color each pixel per
+// `colorMode` -> return a grid + whatever local palette entries it needed. No auto-crop, no
 // automatic background-color removal (both were footguns that clipped/mis-detected real content
 // on some sources -- see the pipeline comments below); background removal is now an explicit, separate,
 // user-triggered action in the sprite editor instead of an automatic import step.
 // `input` is anything sharp() accepts: a file path string, or a Buffer (e.g. an upload body).
-// `size` is a square-target shorthand (used by the CLI's `--size=N`); pass `width`/`height`
-// directly for independent (or non-square) dimensions -- they take priority over `size`.
-export async function imageInputToGrid(
-  input,
-  { size = 64, width, height, colorMode = "precise" } = {},
-) {
-  const targetWidth = width ?? size;
-  const targetHeight = height ?? size;
+export async function imageInputToGrid(input, { size = 64, colorMode = "precise" } = {}) {
   const resized = await sharp(input)
     .ensureAlpha()
-    .resize(targetWidth, targetHeight, {
+    .resize(size, size, {
       kernel: sharp.kernel.nearest,
       fit: "contain",
       background: { r: 0, g: 0, b: 0, alpha: 0 },
@@ -388,6 +381,15 @@ export function spritePathFor(name) {
   return resolved;
 }
 
+// Resolves a sprite name + extension to its exports/<name>.<ext> path, or null if the name is
+// invalid -- same regex-checked-and-path-resolution-checked defense in depth as spritePathFor.
+export function exportPathFor(name, ext) {
+  if (!isValidSpriteName(name)) return null;
+  const resolved = resolve(EXPORTS_DIR, `${name}.${ext}`);
+  if (!resolved.startsWith(EXPORTS_DIR + sep)) return null;
+  return resolved;
+}
+
 // Converts a { rows, localPalette } grid into an ordered list of box-shadow entries, one per
 // non-transparent pixel. Global-palette pixels use `var(--color-x)` (one edit point restyles
 // every sprite); local-palette pixels (from imageInputToGrid's precise/conform modes) use their
@@ -405,4 +407,51 @@ export function gridToBoxShadow({ rows, localPalette }) {
     });
   });
   return entries;
+}
+
+// Renders a { rows, localPalette } grid into a flat RGBA pixel buffer (width * height * 4 bytes,
+// row-major, one pixel per grid cell) for sharp to encode as PNG/WebP -- used by the sprite
+// editor's export endpoint. Same char-lookup precedence as gridToBoxShadow (global palette first,
+// then the sprite's own local palette); `.` and any unrecognized char stay alpha 0 (the buffer
+// starts zeroed), matching gridToBoxShadow's silently-skip-unknown-chars behavior rather than
+// throwing.
+export function gridToRgba({ rows, localPalette }) {
+  const height = rows.length;
+  const width = rows[0]?.length ?? 0;
+  const globalRgbByChar = new Map(PALETTE_ENTRIES.map((e) => [e.char, e.rgb]));
+  const buffer = Buffer.alloc(width * height * 4);
+  for (let y = 0; y < height; y++) {
+    const row = rows[y];
+    for (let x = 0; x < width; x++) {
+      const ch = row[x];
+      if (ch === ".") continue;
+      const rgb = globalRgbByChar.get(ch) ?? (localPalette?.[ch] ? hexToRgb(localPalette[ch]) : null);
+      if (!rgb) continue;
+      const idx = (y * width + x) * 4;
+      buffer[idx] = rgb[0];
+      buffer[idx + 1] = rgb[1];
+      buffer[idx + 2] = rgb[2];
+      buffer[idx + 3] = 255;
+    }
+  }
+  return { width, height, buffer };
+}
+
+// Same box-shadow text format scripts/build-sprites.mjs's private scssFor() produces, callable
+// directly for the sprite editor's standalone SCSS export (exports/<name>.scss) instead of
+// duplicating the template.
+export function gridToScss({ name, rows, localPalette }) {
+  const entries = gridToBoxShadow({ rows, localPalette });
+  const body = entries.length > 0 ? entries.join(",\n    ") : "none";
+  return `.sprite-${name} {\n  box-shadow:\n    ${body};\n}\n`;
+}
+
+// Writes a { rows, localPalette } grid to disk as a PNG or WebP file at outPath, at exact 1:1
+// pixel resolution (one image pixel per grid cell) -- used by the sprite editor's export
+// endpoint. Keeps sharp usage centralized in this module rather than adding it as a direct
+// server.mjs dependency.
+export async function writeGridImage({ rows, localPalette }, format, outPath) {
+  const { width, height, buffer } = gridToRgba({ rows, localPalette });
+  const image = sharp(buffer, { raw: { width, height, channels: 4 } });
+  await (format === "webp" ? image.webp() : image.png()).toFile(outPath);
 }

@@ -7,6 +7,9 @@
 const MIN_DIMENSION = 8;
 const MAX_DIMENSION = 256;
 const DEFAULT_DIMENSION = 64;
+// The size slider only stops at these round, classic pixel-art sizes (index-driven, see
+// availablePresets()) rather than dragging freely across the full range.
+const SIZE_PRESETS = [8, 16, 32, 64, 128, 256];
 const CELL_PX = 8; // backing-store px per grid cell, fixed regardless of sprite size
 const TARGET_DISPLAY_EDGE = 560; // px -- auto-fit viewScale keeps the longer displayed edge near this
 const BRUSH_MIN = 1;
@@ -29,13 +32,14 @@ const importInput = document.getElementById("import-input");
 const importModeSelect = document.getElementById("import-mode");
 const removeBgBtn = document.getElementById("remove-bg-btn");
 const maximizeBtn = document.getElementById("maximize-btn");
+const fitToArtBtn = document.getElementById("fit-to-art-btn");
 const statusEl = document.getElementById("status");
 const brushSizeInput = document.getElementById("brush-size");
 const brushSizeValueEl = document.getElementById("brush-size-value");
 const colorCountInput = document.getElementById("color-count");
 const colorCountValueEl = document.getElementById("color-count-value");
-const widthInput = document.getElementById("sprite-width");
-const heightInput = document.getElementById("sprite-height");
+const sizeInput = document.getElementById("sprite-size");
+const sizeValueEl = document.getElementById("sprite-size-value");
 const dimensionHintEl = document.getElementById("dimension-hint");
 const paletteAddToggleBtn = document.getElementById("palette-add-toggle");
 const paletteAddFormEl = document.getElementById("palette-add-form");
@@ -43,6 +47,14 @@ const paletteAddColorInput = document.getElementById("palette-add-color");
 const paletteAddLabelInput = document.getElementById("palette-add-label");
 const paletteAddConfirmBtn = document.getElementById("palette-add-confirm");
 const paletteAddCancelBtn = document.getElementById("palette-add-cancel");
+const zoomInput = document.getElementById("view-zoom");
+const zoomValueEl = document.getElementById("view-zoom-value");
+const exportToggleBtn = document.getElementById("export-toggle");
+const exportMenuEl = document.getElementById("export-menu");
+const exportJsonBtn = document.getElementById("export-json-btn");
+const exportPngBtn = document.getElementById("export-png-btn");
+const exportWebpBtn = document.getElementById("export-webp-btn");
+const exportScssBtn = document.getElementById("export-scss-btn");
 
 let globalPalette = []; // [{ char, hex, cssVar, rgb }] -- the shared tokens, from /api/palette
 let globalHexByChar = new Map();
@@ -55,9 +67,11 @@ let localRgbByChar = new Map(); // derived from localPalette, rebuilt by setLoca
 let selectedChar = null;
 let eraserEl = null;
 let width = DEFAULT_DIMENSION; // current grid's pixel width -- mutable, see resizeGrid()
-let height = DEFAULT_DIMENSION; // current grid's pixel height
-let sourceCeilingWidth = null; // sourceGrid's native dims -- the resize ceiling. null (a blank
-let sourceCeilingHeight = null; // "new" sprite, no sourceGrid yet) means free range up to MAX_DIMENSION.
+let height = DEFAULT_DIMENSION; // current grid's pixel height -- kept as its own variable (rather
+// than always reading `width`) so a legacy non-square sprite can still load and be edited as-is;
+// the size slider itself only ever sets width === height going forward.
+let sourceCeiling = null; // sourceGrid's native square size -- the resize ceiling. null (a blank
+// "new" sprite, no sourceGrid yet) means free range up to MAX_DIMENSION.
 let grid = makeBlankGrid();
 let sourceGrid = null; // highest-fidelity grid since last import/load: full native resolution and
 // full color count. The pipeline is sourceGrid -> resampleGrid(width, height) -> reduceColors(n)
@@ -75,6 +89,12 @@ let hoverCell = null; // [x, y] cell under the cursor, for the brush-size cursor
 let moving = false;
 let moveStart = null; // [clientX, clientY] where a move-tool drag started
 let moveSourceGrid = null; // grid snapshot at drag start, so panning recomputes instead of drifting
+let hasUnsavedChanges = false; // true once `grid` has changed since the last successful Save --
+// gates the confirm-before-discard prompts on sprite switch/import and the native
+// beforeunload warning on reload/close.
+let currentSpriteSelection = ""; // mirrors spriteSelect.value for the currently loaded sprite --
+// lets us revert the <select> if the user cancels an unsaved-changes prompt, since the native
+// "change" event has already committed the new value before our handler ever runs.
 
 function makeBlankGrid(w = width, h = height) {
   return Array.from({ length: h }, () => Array(w).fill("."));
@@ -315,20 +335,29 @@ function autoFitViewScale() {
   return Math.min(VIEW_SCALE_MAX, Math.max(VIEW_SCALE_MIN, TARGET_DISPLAY_EDGE / longEdge));
 }
 
-// Syncs the width/height number inputs' value and range to current state -- range is capped to
-// sourceGrid's native dims when one exists (can't gain real detail past what was ever captured),
-// or MAX_DIMENSION freely for a blank sprite (pure canvas resize, no resampling ceiling).
-function syncDimensionInputs() {
-  widthInput.min = String(MIN_DIMENSION);
-  widthInput.max = String(sourceCeilingWidth ?? MAX_DIMENSION);
-  widthInput.value = String(width);
-  heightInput.min = String(MIN_DIMENSION);
-  heightInput.max = String(sourceCeilingHeight ?? MAX_DIMENSION);
-  heightInput.value = String(height);
-  dimensionHintEl.textContent =
-    sourceCeilingWidth && sourceCeilingHeight
-      ? `(native: ${sourceCeilingWidth}×${sourceCeilingHeight})`
-      : "";
+// The size slider's available stops: SIZE_PRESETS filtered to the current ceiling (can't gain
+// real detail past what sourceGrid ever captured), with the exact ceiling appended as a top stop
+// when it isn't already one of the round presets (e.g. a small imported image's native size, or
+// an import capped to MAX_DIMENSION) -- so "full native resolution" is always reachable even when
+// it isn't a clean power of two. A blank "new" sprite (no ceiling) gets the presets unfiltered.
+function availablePresets() {
+  const ceiling = sourceCeiling ?? MAX_DIMENSION;
+  const presets = SIZE_PRESETS.filter((s) => s <= ceiling);
+  if (presets.length === 0 || presets[presets.length - 1] !== ceiling) presets.push(ceiling);
+  return presets;
+}
+
+// Syncs the size slider's range/value and the native-size hint to current state. Only call this
+// from outside the slider's own "input" handler (sprite switch/load/import/init) -- calling it
+// mid-drag would fight the user by resetting `.value` under their cursor.
+function syncSizeSlider() {
+  const presets = availablePresets();
+  sizeInput.max = String(presets.length - 1);
+  const found = presets.findIndex((p) => p >= width);
+  const idx = found === -1 ? presets.length - 1 : found;
+  sizeInput.value = String(idx);
+  sizeValueEl.textContent = `${presets[idx]}px`;
+  dimensionHintEl.textContent = sourceCeiling ? `(native: ${sourceCeiling}×${sourceCeiling})` : "";
 }
 
 // Nearest-neighbor spatial resample: given a source grid, produces a new target-size grid by
@@ -360,20 +389,22 @@ function rebuildGridFromSource() {
   if (!sourceGrid) return;
   const resampled = resampleGrid(sourceGrid, width, height);
   grid = reduceColors(resampled, Number.parseInt(colorCountInput.value, 10));
+  hasUnsavedChanges = true;
   refresh();
 }
 
-// Resizes the sprite to newWidth x newHeight, clamped to the current ceiling. For an
+// Resizes the sprite to a newSize x newSize square, clamped to the current ceiling. For an
 // imported/loaded sprite (sourceGrid exists), this resamples from that high-fidelity source. For
 // a blank "new" sprite (no sourceGrid), it's a pure canvas resize: existing painted cells are
-// preserved anchored top-left, cropping overflow and padding new area transparent.
-function resizeGrid(newWidth, newHeight) {
-  const maxW = sourceCeilingWidth ?? MAX_DIMENSION;
-  const maxH = sourceCeilingHeight ?? MAX_DIMENSION;
-  const clampedW = Number.isFinite(newWidth) ? Math.round(newWidth) : width;
-  const clampedH = Number.isFinite(newHeight) ? Math.round(newHeight) : height;
-  width = Math.min(maxW, Math.max(MIN_DIMENSION, clampedW));
-  height = Math.min(maxH, Math.max(MIN_DIMENSION, clampedH));
+// preserved anchored top-left, cropping overflow and padding new area transparent. Does NOT touch
+// the slider's own DOM state -- callers driven by the slider's drag already reflect the position
+// the user chose; callers elsewhere (sprite switch/load/import/init) call syncSizeSlider() too.
+function resizeGrid(newSize) {
+  const ceiling = sourceCeiling ?? MAX_DIMENSION;
+  const clamped = Number.isFinite(newSize) ? Math.round(newSize) : width;
+  width = Math.min(ceiling, Math.max(MIN_DIMENSION, clamped));
+  height = width;
+  hasUnsavedChanges = true;
 
   if (!sourceGrid) {
     const oldGrid = grid;
@@ -388,7 +419,6 @@ function resizeGrid(newWidth, newHeight) {
     grid = next;
   }
 
-  syncDimensionInputs();
   resizeCanvasBackingStore();
   setViewScale(autoFitViewScale());
 
@@ -399,11 +429,12 @@ function resizeGrid(newWidth, newHeight) {
   }
 }
 
-widthInput.addEventListener("change", () => {
-  resizeGrid(Number.parseInt(widthInput.value, 10), height);
-});
-heightInput.addEventListener("change", () => {
-  resizeGrid(width, Number.parseInt(heightInput.value, 10));
+sizeInput.addEventListener("input", () => {
+  const presets = availablePresets();
+  const idx = Math.min(presets.length - 1, Number.parseInt(sizeInput.value, 10));
+  const size = presets[idx];
+  sizeValueEl.textContent = `${size}px`;
+  resizeGrid(size);
 });
 
 // ---- sprite list / load ----
@@ -422,42 +453,54 @@ async function loadSpriteList() {
 
 spriteSelect.addEventListener("change", async () => {
   const name = spriteSelect.value;
+  // The native "change" event already committed spriteSelect.value to `name` before this handler
+  // runs -- if the user backs out, revert it to whatever was actually loaded.
+  if (hasUnsavedChanges && !confirm("You have unsaved changes. Discard them and continue?")) {
+    spriteSelect.value = currentSpriteSelection;
+    return;
+  }
   if (!name) {
     width = DEFAULT_DIMENSION;
     height = DEFAULT_DIMENSION;
-    sourceCeilingWidth = null;
-    sourceCeilingHeight = null;
+    sourceCeiling = null;
     sourceGrid = null;
     grid = makeBlankGrid();
     setLocalPalette({});
     nameInput.value = "";
     loadedExisting = false;
+    hasUnsavedChanges = false;
+    currentSpriteSelection = "";
     setColorCountMax(20);
     resizeCanvasBackingStore();
     setViewScale(autoFitViewScale());
-    syncDimensionInputs();
+    syncSizeSlider();
     refresh();
     return;
   }
   const res = await fetch(`/api/sprites/${encodeURIComponent(name)}`);
   if (!res.ok) {
     setStatus("Could not load that sprite.", true);
+    spriteSelect.value = currentSpriteSelection;
     return;
   }
   const data = await res.json();
+  // A saved sprite's own width/height are trusted as-is even if they aren't square (e.g. a
+  // legacy sprite from before the size slider went square-only) -- only touching the slider
+  // afterward forces it square from that point on.
   width = data.width;
   height = data.height;
-  sourceCeilingWidth = data.width;
-  sourceCeilingHeight = data.height;
+  sourceCeiling = Math.max(data.width, data.height);
   grid = data.rows.map((row) => [...row]);
   sourceGrid = grid.map((row) => [...row]);
   setLocalPalette(data.localPalette ?? {});
   nameInput.value = data.name;
   loadedExisting = true;
+  hasUnsavedChanges = false;
+  currentSpriteSelection = name;
   setColorCountMax(countDistinctColors(sourceGrid));
   resizeCanvasBackingStore();
   setViewScale(autoFitViewScale());
-  syncDimensionInputs();
+  syncSizeSlider();
   setStatus(`Loaded: ${name}`);
   refresh();
 });
@@ -476,6 +519,10 @@ function sanitizeName(raw) {
 importInput.addEventListener("change", async () => {
   const file = importInput.files[0];
   if (!file) return;
+  if (hasUnsavedChanges && !confirm("You have unsaved changes. Discard them and import anyway?")) {
+    importInput.value = "";
+    return;
+  }
   const mode = importModeSelect.value === "conform" ? "conform" : "precise";
   setStatus("Importing...");
   try {
@@ -485,23 +532,24 @@ importInput.addEventListener("change", async () => {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "import failed");
-    // The server decodes at the image's native resolution (capped to MAX_DIMENSION on the long
-    // edge) rather than always crushing it to a fixed sprite size, so this is shown at full
-    // resolution first -- shrinking further is a client-side resample (resizeGrid) from here on.
+    // The server decodes at the image's native square size (its longer edge, capped to
+    // MAX_DIMENSION) rather than always crushing it to a fixed sprite size, so this is shown at
+    // full resolution first -- shrinking further is a client-side resample (resizeGrid) from here on.
     width = data.width;
     height = data.height;
-    sourceCeilingWidth = data.width;
-    sourceCeilingHeight = data.height;
+    sourceCeiling = Math.max(data.width, data.height);
     grid = data.rows.map((row) => [...row]);
     sourceGrid = grid.map((row) => [...row]);
     setLocalPalette(data.localPalette);
     loadedExisting = false;
+    hasUnsavedChanges = true;
     spriteSelect.value = "";
+    currentSpriteSelection = "";
     if (!nameInput.value) nameInput.value = sanitizeName(file.name);
     setColorCountMax(countDistinctColors(sourceGrid));
     resizeCanvasBackingStore();
     setViewScale(autoFitViewScale());
-    syncDimensionInputs();
+    syncSizeSlider();
     const localCount = Object.keys(data.localPalette).length;
     const modeLabel = mode === "conform" ? "conform to palette" : "precise";
     setStatus(
@@ -538,6 +586,7 @@ function removeBackground() {
       }
     }
   }
+  hasUnsavedChanges = true;
   setStatus(`Background removed — ${count} pixel(s) cleared.`);
   refresh();
 }
@@ -597,11 +646,74 @@ function maximizeItem() {
     }
   }
   grid = next;
+  hasUnsavedChanges = true;
   setStatus(`Maximized — scale ${scale.toFixed(2)}x, proportions kept.`);
   refresh();
 }
 
 maximizeBtn.addEventListener("click", maximizeItem);
+
+// ---- fit to art (trim transparent padding, snap the longer edge to the size slider's preset) ----
+
+// Crops to the drawing's own bounding box (no more wasted transparent rows/cols from a
+// non-square source letterboxed into a square frame -- e.g. a wide cloud sitting in a mostly-
+// empty 128x128), then rescales so the content's longer edge matches whatever preset the size
+// slider is currently on (64/128/256/...), the shorter edge following proportionally rather than
+// staying padded to match. Unlike maximizeItem (which keeps the frame's dimensions fixed and only
+// rescales content within it), this actually changes width/height -- so the result usually ends
+// up non-square, same as loading a legacy non-square sprite: touching the size slider afterward
+// squares it off again from that point on, which is fine.
+function fitToArt() {
+  const bbox = contentBBox();
+  if (!bbox) {
+    setStatus("Nothing drawn to fit.");
+    return;
+  }
+  const { minX, minY, maxX, maxY } = bbox;
+  const contentWidth = maxX - minX + 1;
+  const contentHeight = maxY - minY + 1;
+  hasUnsavedChanges = true;
+
+  // Crop sourceGrid (if any) to the same content region, proportionally mapped into its own
+  // resolution -- keeps it as the full-fidelity baseline the resample/color-count pipeline reads
+  // from, so the trim survives later size/color-count slider changes instead of being silently
+  // undone the next time either one moves.
+  if (sourceGrid) {
+    const sgH = sourceGrid.length;
+    const sgW = sourceGrid[0]?.length ?? 0;
+    const sgMinX = Math.floor((minX * sgW) / width);
+    const sgMaxX = Math.min(sgW - 1, Math.ceil(((maxX + 1) * sgW) / width) - 1);
+    const sgMinY = Math.floor((minY * sgH) / height);
+    const sgMaxY = Math.min(sgH - 1, Math.ceil(((maxY + 1) * sgH) / height) - 1);
+    sourceGrid = sourceGrid.slice(sgMinY, sgMaxY + 1).map((row) => row.slice(sgMinX, sgMaxX + 1));
+    sourceCeiling = Math.max(sourceGrid.length, sourceGrid[0]?.length ?? 0);
+  }
+
+  const presets = availablePresets();
+  const sliderIdx = Math.min(presets.length - 1, Number.parseInt(sizeInput.value, 10));
+  const targetLongEdge = presets[sliderIdx];
+  const scale = targetLongEdge / Math.max(contentWidth, contentHeight);
+  width = Math.max(MIN_DIMENSION, Math.min(MAX_DIMENSION, Math.round(contentWidth * scale)));
+  height = Math.max(MIN_DIMENSION, Math.min(MAX_DIMENSION, Math.round(contentHeight * scale)));
+
+  if (!sourceGrid) {
+    const cropped = grid.slice(minY, maxY + 1).map((row) => row.slice(minX, maxX + 1));
+    grid = resampleGrid(cropped, width, height);
+  }
+
+  resizeCanvasBackingStore();
+  setViewScale(autoFitViewScale());
+  syncSizeSlider();
+
+  if (sourceGrid) {
+    rebuildGridFromSource(); // resamples the now-cropped sourceGrid to width x height, calls refresh()
+  } else {
+    refresh();
+  }
+  setStatus(`Fit to art — ${width}×${height}.`);
+}
+
+fitToArtBtn.addEventListener("click", fitToArt);
 
 // ---- tools (paint vs move) ----
 
@@ -638,6 +750,7 @@ function paintAt(evt) {
       grid[y][x] = selectedChar;
     }
   }
+  hasUnsavedChanges = true;
   refresh();
 }
 
@@ -683,6 +796,7 @@ window.addEventListener("mousemove", (evt) => {
   const dx = Math.round(((evt.clientX - moveStart[0]) / rect.width) * width);
   const dy = Math.round(((evt.clientY - moveStart[1]) / rect.height) * height);
   grid = shiftGrid(moveSourceGrid, dx, dy);
+  hasUnsavedChanges = true;
   refresh();
 });
 window.addEventListener("mouseup", () => {
@@ -740,8 +854,15 @@ function setViewScale(scale) {
   viewScale = Math.min(VIEW_SCALE_MAX, Math.max(VIEW_SCALE_MIN, scale));
   canvas.style.width = `${Math.round(canvas.width * viewScale)}px`;
   canvas.style.height = `${Math.round(canvas.height * viewScale)}px`;
-  setStatus(`Zoom: ${Math.round(viewScale * 100)}%`);
+  const percent = Math.round(viewScale * 100);
+  zoomInput.value = String(percent);
+  zoomValueEl.textContent = `${percent}%`;
+  setStatus(`Zoom: ${percent}%`);
 }
+
+zoomInput.addEventListener("input", () => {
+  setViewScale(Number.parseInt(zoomInput.value, 10) / 100);
+});
 
 // ---- color simplify (reduce the drawing to its N most-used colors) ----
 
@@ -861,9 +982,11 @@ window.addEventListener("keydown", (evt) => {
 
 // ---- save ----
 
+const SPRITE_NAME_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+
 async function saveSprite(overwrite) {
   const name = nameInput.value.trim();
-  if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(name)) {
+  if (!SPRITE_NAME_RE.test(name)) {
     setStatus("Invalid name — use lowercase letters, numbers, and hyphens.", true);
     return;
   }
@@ -884,12 +1007,74 @@ async function saveSprite(overwrite) {
     return;
   }
   loadedExisting = true;
+  hasUnsavedChanges = false;
+  currentSpriteSelection = name;
   setStatus(`Saved: art/${name}.json`);
   await loadSpriteList();
   spriteSelect.value = name;
 }
 
 saveBtn.addEventListener("click", () => saveSprite(loadedExisting));
+
+// ---- export as PNG / WebP / SCSS (JSON is just the existing Save) ----
+
+async function exportAs(format, overwrite = false) {
+  const name = nameInput.value.trim();
+  if (!SPRITE_NAME_RE.test(name)) {
+    setStatus("Invalid name — use lowercase letters, numbers, and hyphens.", true);
+    return;
+  }
+  const rows = grid.map((row) => row.join(""));
+  const res = await fetch(`/api/export/${format}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, width, height, rows, overwrite, localPalette }),
+  });
+
+  if (res.status === 409) {
+    if (confirm(`exports/${name}.${format} already exists. Overwrite?`)) {
+      await exportAs(format, true);
+    }
+    return;
+  }
+  const data = await res.json();
+  if (!res.ok) {
+    setStatus(`Export error: ${data.error || res.status}`, true);
+    return;
+  }
+  setStatus(`Exported: ${data.path}`);
+}
+
+exportToggleBtn.addEventListener("click", () => {
+  const showing = exportMenuEl.style.display !== "none";
+  exportMenuEl.style.display = showing ? "none" : "flex";
+});
+exportJsonBtn.addEventListener("click", () => {
+  exportMenuEl.style.display = "none";
+  saveSprite(loadedExisting);
+});
+exportPngBtn.addEventListener("click", () => {
+  exportMenuEl.style.display = "none";
+  exportAs("png");
+});
+exportWebpBtn.addEventListener("click", () => {
+  exportMenuEl.style.display = "none";
+  exportAs("webp");
+});
+exportScssBtn.addEventListener("click", () => {
+  exportMenuEl.style.display = "none";
+  exportAs("scss");
+});
+
+// ---- warn before leaving with unsaved changes ----
+// The native prompt is the only mechanism browsers allow during unload (a custom confirm() can't
+// run here) -- setting returnValue is what triggers it; the actual wording shown is browser-owned.
+
+window.addEventListener("beforeunload", (evt) => {
+  if (!hasUnsavedChanges) return;
+  evt.preventDefault();
+  evt.returnValue = "";
+});
 
 // ---- init ----
 
@@ -900,6 +1085,6 @@ saveBtn.addEventListener("click", () => saveSprite(loadedExisting));
   setColorCountMax(20);
   resizeCanvasBackingStore();
   setViewScale(autoFitViewScale());
-  syncDimensionInputs();
+  syncSizeSlider();
   refresh();
 })();

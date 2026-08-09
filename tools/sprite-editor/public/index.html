@@ -15,6 +15,22 @@
     <main class="layout">
       <section class="panel panel--canvas">
         <div class="row">
+          <label>
+            Sprite name:
+            <input type="text" id="sprite-name" placeholder="e.g. campfire" />
+          </label>
+          <button id="save-btn" type="button">Save</button>
+          <button id="export-toggle" type="button" class="secondary-btn">Export as ▾</button>
+          <span id="status" role="status"></span>
+        </div>
+        <div id="export-menu" class="row" style="display: none">
+          <button id="export-json-btn" type="button" class="secondary-btn">JSON</button>
+          <button id="export-png-btn" type="button" class="secondary-btn">PNG</button>
+          <button id="export-webp-btn" type="button" class="secondary-btn">WebP</button>
+          <button id="export-scss-btn" type="button" class="secondary-btn">SCSS</button>
+        </div>
+
+        <div class="row">
           <label class="file-btn">
             Import image
             <input type="file" id="import-input" accept="image/*" hidden />
@@ -36,17 +52,53 @@
 
         <div class="row">
           <label>
-            Width:
-            <input type="number" id="sprite-width" min="8" max="256" value="64" />
-          </label>
-          <label>
-            Height:
-            <input type="number" id="sprite-height" min="8" max="256" value="64" />
+            Sprite size:
+            <input type="range" id="sprite-size" min="0" max="5" step="1" value="3" />
+            <span id="sprite-size-value">64px</span>
           </label>
           <span id="dimension-hint" class="hint"></span>
+          <label>
+            Zoom:
+            <input type="range" id="view-zoom" min="15" max="400" step="5" value="100" />
+            <span id="view-zoom-value">100%</span>
+          </label>
         </div>
 
         <canvas id="grid-canvas" width="512" height="512"></canvas>
+
+        <div class="row">
+          <button id="remove-bg-btn" type="button" class="secondary-btn icon-btn" title="Remove background — clears the drawing's 4 corner colors">
+            <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false">
+              <rect x="3" y="3" width="8" height="8" fill="#999"></rect>
+              <rect x="13" y="3" width="8" height="8" fill="#555"></rect>
+              <rect x="3" y="13" width="8" height="8" fill="#555"></rect>
+              <rect x="13" y="13" width="8" height="8" fill="#999"></rect>
+              <line x1="3" y1="21" x2="21" y2="3" stroke="#e05252" stroke-width="2.5"></line>
+            </svg>
+          </button>
+          <button id="maximize-btn" type="button" class="secondary-btn icon-btn" title="Maximize item — scales the drawing to the largest size that fits, without distorting it">
+            <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false">
+              <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
+            </svg>
+          </button>
+          <button id="fit-to-art-btn" type="button" class="secondary-btn icon-btn" title="Fit to art — trims transparent padding and snaps the longer edge to the sprite-size slider's value">
+            <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false">
+              <path d="M6 2v14a2 2 0 0 0 2 2h14M2 6h14a2 2 0 0 1 2 2v14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
+            </svg>
+          </button>
+        </div>
+
+        <div class="row">
+          <label>
+            Simplify colors:
+            <input type="range" id="color-count" min="2" max="15" step="1" value="15" />
+            <span id="color-count-value">15 colors</span>
+          </label>
+        </div>
+      </section>
+
+      <section class="panel panel--palette">
+        <h2>Palette</h2>
 
         <div class="row">
           <label>
@@ -57,36 +109,6 @@
           <span class="hint">[ / ] brush size · E: eraser · M: move · Shift+wheel: zoom</span>
         </div>
 
-        <div class="row">
-          <button id="remove-bg-btn" type="button" class="secondary-btn">Remove background</button>
-          <span class="hint">Clears the drawing's 4 corner colors, if needed.</span>
-        </div>
-
-        <div class="row">
-          <button id="maximize-btn" type="button" class="secondary-btn">Maximize item</button>
-          <span class="hint">Scales the drawing to the largest size that fits, without distorting it.</span>
-        </div>
-
-        <div class="row">
-          <label>
-            Simplify colors:
-            <input type="range" id="color-count" min="2" max="15" step="1" value="15" />
-            <span id="color-count-value">15 colors</span>
-          </label>
-        </div>
-
-        <div class="row">
-          <label>
-            Sprite name:
-            <input type="text" id="sprite-name" placeholder="e.g. campfire" />
-          </label>
-          <button id="save-btn" type="button">Save</button>
-          <span id="status" role="status"></span>
-        </div>
-      </section>
-
-      <section class="panel panel--palette">
-        <h2>Palette</h2>
         <div id="palette-swatches" class="swatches"></div>
 
         <div class="row">

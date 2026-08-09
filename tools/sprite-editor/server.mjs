@@ -6,21 +6,26 @@
 // Usage: npm run sprite-editor  (or: node tools/sprite-editor/server.mjs)
 
 import { exec } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { extname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   ART_DIR,
+  EXPORTS_DIR,
+  exportPathFor,
+  gridToScss,
   imageInputToGrid,
+  isValidSpriteName,
   LEGEND_PATH,
   MAX_DIMENSION,
   MIN_DIMENSION,
-  nativeGridDimensions,
+  nativeGridSize,
   PALETTE_ENTRIES,
   PALETTE_HEX_PATH,
   reloadPaletteFromDisk,
   spritePathFor,
+  writeGridImage,
 } from "../../scripts/lib/pixel-grid.mjs";
 
 const PORT = Number.parseInt(process.env.PORT ?? "5787", 10);
@@ -108,6 +113,33 @@ function pickUnusedGlobalChar() {
     if (!reserved.has(ch) && !used.has(ch)) return ch;
   }
   return null;
+}
+
+// Validates the { width, height, rows, localPalette } shape shared by the sprite-save endpoint
+// and the export endpoints below -- one check instead of four near-identical copies. Returns an
+// error string, or null when the payload is valid.
+function validateGridPayload({ width, height, rows, localPalette }) {
+  const dimsValid =
+    Number.isInteger(width) &&
+    Number.isInteger(height) &&
+    width >= MIN_DIMENSION &&
+    width <= MAX_DIMENSION &&
+    height >= MIN_DIMENSION &&
+    height <= MAX_DIMENSION;
+  const rowsValid =
+    Array.isArray(rows) &&
+    rows.length === height &&
+    rows.every((r) => typeof r === "string" && r.length === width);
+  if (!dimsValid || !rowsValid) {
+    return `grid dimensions must be ${MIN_DIMENSION}-${MAX_DIMENSION}px and rows must match width/height`;
+  }
+  const localPaletteValid =
+    localPalette === undefined ||
+    (typeof localPalette === "object" &&
+      localPalette !== null &&
+      !Array.isArray(localPalette) &&
+      Object.values(localPalette).every((v) => typeof v === "string"));
+  return localPaletteValid ? null : "localPalette must be a char->hex object";
 }
 
 function slugify(label) {
@@ -258,31 +290,9 @@ async function handleApi(req, res, url) {
         return true;
       }
       const { width, height, rows, overwrite, localPalette } = payload;
-      const dimsValid =
-        Number.isInteger(width) &&
-        Number.isInteger(height) &&
-        width >= MIN_DIMENSION &&
-        width <= MAX_DIMENSION &&
-        height >= MIN_DIMENSION &&
-        height <= MAX_DIMENSION;
-      const rowsValid =
-        Array.isArray(rows) &&
-        rows.length === height &&
-        rows.every((r) => typeof r === "string" && r.length === width);
-      if (!dimsValid || !rowsValid) {
-        sendJson(res, 400, {
-          error: `grid dimensions must be ${MIN_DIMENSION}-${MAX_DIMENSION}px and rows must match width/height`,
-        });
-        return true;
-      }
-      const localPaletteValid =
-        localPalette === undefined ||
-        (typeof localPalette === "object" &&
-          localPalette !== null &&
-          !Array.isArray(localPalette) &&
-          Object.values(localPalette).every((v) => typeof v === "string"));
-      if (!localPaletteValid) {
-        sendJson(res, 400, { error: "localPalette must be a char->hex object" });
+      const validationError = validateGridPayload({ width, height, rows, localPalette });
+      if (validationError) {
+        sendJson(res, 400, { error: validationError });
         return true;
       }
       if (existsSync(path) && overwrite !== true) {
@@ -304,8 +314,8 @@ async function handleApi(req, res, url) {
         return true;
       }
       const colorMode = url.searchParams.get("mode") === "conform" ? "conform" : "precise";
-      const { width, height } = await nativeGridDimensions(body, { maxDimension: MAX_DIMENSION });
-      const grid = await imageInputToGrid(body, { width, height, colorMode });
+      const size = await nativeGridSize(body, { maxDimension: MAX_DIMENSION });
+      const grid = await imageInputToGrid(body, { size, colorMode });
       sendJson(res, 200, {
         width: grid.width,
         height: grid.height,
@@ -316,6 +326,55 @@ async function handleApi(req, res, url) {
     } catch (err) {
       sendJson(res, 400, { error: `couldn't decode image: ${err.message}` });
     }
+    return true;
+  }
+
+  const exportMatch = url.pathname.match(/^\/api\/export\/([^/]+)$/);
+  if (req.method === "POST" && exportMatch) {
+    const format = exportMatch[1];
+    if (!["png", "webp", "scss"].includes(format)) {
+      sendJson(res, 400, { error: "format must be png, webp, or scss" });
+      return true;
+    }
+    let payload;
+    try {
+      const body = await readBody(req);
+      payload = JSON.parse(body.toString("utf8"));
+    } catch {
+      sendJson(res, 400, { error: "invalid JSON body" });
+      return true;
+    }
+    const { name, width, height, rows, overwrite, localPalette } = payload;
+    if (!isValidSpriteName(name)) {
+      sendJson(res, 400, { error: "invalid sprite name" });
+      return true;
+    }
+    const validationError = validateGridPayload({ width, height, rows, localPalette });
+    if (validationError) {
+      sendJson(res, 400, { error: validationError });
+      return true;
+    }
+    const outPath = exportPathFor(name, format);
+    if (!outPath) {
+      sendJson(res, 400, { error: "invalid sprite name" });
+      return true;
+    }
+    if (existsSync(outPath) && overwrite !== true) {
+      sendJson(res, 409, { exists: true });
+      return true;
+    }
+    mkdirSync(EXPORTS_DIR, { recursive: true });
+    try {
+      if (format === "scss") {
+        writeFileSync(outPath, gridToScss({ name, rows, localPalette }));
+      } else {
+        await writeGridImage({ rows, localPalette }, format, outPath);
+      }
+    } catch (err) {
+      sendJson(res, 500, { error: `export failed: ${err.message}` });
+      return true;
+    }
+    sendJson(res, 200, { ok: true, path: `exports/${name}.${format}` });
     return true;
   }
 

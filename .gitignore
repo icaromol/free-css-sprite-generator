@@ -17,4 +17,5 @@ CLAUDE.md
 .aider*
 .continue/
 .github/copilot-instructions.md
-art/*.debug.png
+art/
+exports/

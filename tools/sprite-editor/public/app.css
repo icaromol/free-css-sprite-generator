@@ -82,7 +82,6 @@ body {
 }
 
 input[type="text"],
-input[type="number"],
 select {
   background: #1a1a1a;
   color: #eee;
@@ -90,10 +89,6 @@ select {
   border-radius: 4px;
   padding: 4px 8px;
   font-size: 0.85rem;
-}
-
-input[type="number"] {
-  width: 70px;
 }
 
 input[type="color"] {
@@ -144,6 +139,15 @@ button {
 
 .secondary-btn:hover {
   background: #454545;
+}
+
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
 }
 
 button:hover {
