@@ -642,6 +642,34 @@ function contentBBox() {
   return maxX < 0 ? null : { minX, minY, maxX, maxY };
 }
 
+// Scales the content within [minX,minY]-[maxX,maxY] up to fill a w x h frame, single uniform
+// scale for both axes -- whichever dimension is proportionally larger caps the scale, so the
+// content grows as much as possible without stretching either axis differently (locks
+// proportions). Inverse (destination -> source) mapping, same technique as the sprite-scale/brush
+// math elsewhere in this file, avoids sampling holes when scaling up. Pure function of its
+// arguments -- doesn't read/write any module state -- so it can run against `grid` or `sourceGrid`
+// (a different resolution) identically.
+function maximizeContent(source, w, h, minX, minY, maxX, maxY) {
+  const contentWidth = maxX - minX + 1;
+  const contentHeight = maxY - minY + 1;
+  const scale = Math.min(w / contentWidth, h / contentHeight);
+  const contentCenterX = (minX + maxX) / 2;
+  const contentCenterY = (minY + maxY) / 2;
+  const frameCenterX = (w - 1) / 2;
+  const frameCenterY = (h - 1) / 2;
+  const next = makeBlankGrid(w, h);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const srcX = Math.round((x - frameCenterX) / scale + contentCenterX);
+      const srcY = Math.round((y - frameCenterY) / scale + contentCenterY);
+      if (srcX >= 0 && srcX < w && srcY >= 0 && srcY < h) {
+        next[y][x] = source[srcY][srcX];
+      }
+    }
+  }
+  return { next, scale };
+}
+
 function maximizeItem() {
   const bbox = contentBBox();
   if (!bbox) {
@@ -655,30 +683,35 @@ function maximizeItem() {
     setStatus("The drawing already fills the whole frame.");
     return;
   }
-  // Single uniform scale for both axes -- whichever dimension is proportionally larger caps the
-  // scale, so the content grows as much as possible without stretching either axis differently
-  // (locks proportions, per the ask). Inverse (destination -> source) mapping, same technique as
-  // the sprite-scale/brush math elsewhere in this file, avoids sampling holes when scaling up.
-  const scale = Math.min(width / contentWidth, height / contentHeight);
-  const contentCenterX = (minX + maxX) / 2;
-  const contentCenterY = (minY + maxY) / 2;
-  const frameCenterX = (width - 1) / 2;
-  const frameCenterY = (height - 1) / 2;
-  const source = grid;
-  const next = makeBlankGrid();
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const srcX = Math.round((x - frameCenterX) / scale + contentCenterX);
-      const srcY = Math.round((y - frameCenterY) / scale + contentCenterY);
-      if (srcX >= 0 && srcX < width && srcY >= 0 && srcY < height) {
-        next[y][x] = source[srcY][srcX];
-      }
-    }
+
+  // Also apply the same transform to sourceGrid (if any), at ITS OWN resolution, by proportionally
+  // mapping the bbox into source coordinates -- same mapping fitToArt uses below for cropping.
+  // Without this, sourceGrid keeps the un-maximized layout, and the next resize or color-count
+  // change (which both rebuild `grid` from `sourceGrid` -- see rebuildGridFromSource) would
+  // silently discard the maximize. Mirrors fitToArt's identical concern/comment further down.
+  let scale;
+  if (sourceGrid) {
+    const sgH = sourceGrid.length;
+    const sgW = sourceGrid[0]?.length ?? 0;
+    const sgMinX = Math.floor((minX * sgW) / width);
+    const sgMaxX = Math.min(sgW - 1, Math.ceil(((maxX + 1) * sgW) / width) - 1);
+    const sgMinY = Math.floor((minY * sgH) / height);
+    const sgMaxY = Math.min(sgH - 1, Math.ceil(((maxY + 1) * sgH) / height) - 1);
+    const result = maximizeContent(sourceGrid, sgW, sgH, sgMinX, sgMinY, sgMaxX, sgMaxY);
+    sourceGrid = result.next;
   }
-  grid = next;
+
   hasUnsavedChanges = true;
+  if (sourceGrid) {
+    scale = Math.min(width / contentWidth, height / contentHeight);
+    rebuildGridFromSource(); // resamples the now-maximized sourceGrid to width x height, calls refresh()
+  } else {
+    const result = maximizeContent(grid, width, height, minX, minY, maxX, maxY);
+    grid = result.next;
+    scale = result.scale;
+    refresh();
+  }
   setStatus(`Maximized — scale ${scale.toFixed(2)}x, proportions kept.`);
-  refresh();
 }
 
 maximizeBtn.addEventListener("click", maximizeItem);
