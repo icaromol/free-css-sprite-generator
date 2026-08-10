@@ -57,6 +57,8 @@ function rgbToHex(r, g, b) {
   return `#${[r, g, b].map((v) => Math.round(v).toString(16).padStart(2, "0")).join("")}`;
 }
 
+const HEX_LINE_RE = /^[0-9a-fA-F]{6}$/;
+
 // Palette is loaded from the two files that are the actual source of truth -- no hardcoded
 // fourth copy. art/legend.json's key order (excluding "_comment" and ".") must match
 // art/palette.hex's line order; both are hand-maintained together, see README.md.
@@ -66,6 +68,15 @@ function loadPaletteEntries() {
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean);
+  // Without this, a malformed line (wrong digit count, stray character) isn't rejected --
+  // Number.parseInt on garbage yields NaN, and NaN >> 16 silently coerces to 0 in JS, so a typo
+  // becomes solid black instead of a clear error. Worth catching explicitly since hand-editing
+  // this file is a documented workflow (see docs/drawing-workflow.md).
+  hexLines.forEach((line, i) => {
+    if (!HEX_LINE_RE.test(line)) {
+      throw new Error(`art/palette.hex line ${i + 1} ("${line}") isn't a valid 6-digit hex color.`);
+    }
+  });
   const chars = Object.keys(legend).filter((k) => k !== "_comment" && k !== ".");
   if (chars.length !== hexLines.length) {
     throw new Error(
