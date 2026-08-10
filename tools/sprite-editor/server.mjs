@@ -156,6 +156,18 @@ function validateGridPayload({ width, height, rows, localPalette }) {
   return localPaletteValid ? null : "localPalette must be a char->hex object";
 }
 
+// art/legend.json is hand-edited per docs/drawing-workflow.md -- a syntax error left there while
+// editing shouldn't crash the whole (long-lived) server the next time a palette endpoint reads it.
+// Throws a clear, specific error instead; the top-level try/catch around the request handler below
+// turns that into a clean 500 rather than an unhandled rejection.
+function readLegend() {
+  try {
+    return JSON.parse(readFileSync(LEGEND_PATH, "utf8"));
+  } catch (err) {
+    throw new Error(`art/legend.json is invalid JSON: ${err.message}`);
+  }
+}
+
 function slugify(label) {
   return label
     .toLowerCase()
@@ -223,7 +235,7 @@ async function handleApi(req, res, url) {
     const cssVar = uniqueCssVar(label);
     const normalizedHex = hex.toLowerCase();
 
-    const legend = JSON.parse(readFileSync(LEGEND_PATH, "utf8"));
+    const legend = readLegend();
     legend[char] = cssVar;
     writeFileSync(LEGEND_PATH, `${JSON.stringify(legend, null, 2)}\n`);
 
@@ -242,7 +254,7 @@ async function handleApi(req, res, url) {
   const paletteDeleteMatch = url.pathname.match(/^\/api\/palette\/([^/]+)$/);
   if (req.method === "DELETE" && paletteDeleteMatch) {
     const char = decodeURIComponent(paletteDeleteMatch[1]);
-    const legend = JSON.parse(readFileSync(LEGEND_PATH, "utf8"));
+    const legend = readLegend();
     if (char.length !== 1 || char === "." || !(char in legend) || char === "_comment") {
       sendJson(res, 404, { error: "not found" });
       return true;
@@ -397,18 +409,27 @@ async function handleApi(req, res, url) {
 }
 
 const server = createServer(async (req, res) => {
-  const url = new URL(req.url, `http://localhost:${PORT}`);
-  if (url.pathname === "/shared/color-reduce.mjs") {
-    res.writeHead(200, { "Content-Type": "text/javascript; charset=utf-8" });
-    res.end(readFileSync(SHARED_COLOR_REDUCE_PATH));
-    return;
+  // Backstop: node:http never awaits or catches what an async request listener's promise does,
+  // so any uncaught throw/rejection in here (readLegend() above being the concrete case that
+  // motivated this) would otherwise become an unhandled rejection and crash the whole process --
+  // taking the editor down for a single bad request instead of just failing that request.
+  try {
+    const url = new URL(req.url, `http://localhost:${PORT}`);
+    if (url.pathname === "/shared/color-reduce.mjs") {
+      res.writeHead(200, { "Content-Type": "text/javascript; charset=utf-8" });
+      res.end(readFileSync(SHARED_COLOR_REDUCE_PATH));
+      return;
+    }
+    if (url.pathname.startsWith("/api/")) {
+      const handled = await handleApi(req, res, url);
+      if (!handled) sendJson(res, 404, { error: "not found" });
+      return;
+    }
+    serveStatic(req, res);
+  } catch (err) {
+    console.error("Request handler error:", err);
+    if (!res.headersSent) sendJson(res, 500, { error: err.message });
   }
-  if (url.pathname.startsWith("/api/")) {
-    const handled = await handleApi(req, res, url);
-    if (!handled) sendJson(res, 404, { error: "not found" });
-    return;
-  }
-  serveStatic(req, res);
 });
 
 // Explicit host: omitting it binds to all interfaces (0.0.0.0-equivalent), which would expose
