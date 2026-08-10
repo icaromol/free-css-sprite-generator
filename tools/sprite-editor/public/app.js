@@ -5,11 +5,11 @@
 // Keep in sync with scripts/lib/pixel-grid.mjs's MIN_DIMENSION/MAX_DIMENSION -- this is a
 // separate browser bundle with no shared import, so the ceiling is duplicated here.
 const MIN_DIMENSION = 8;
-const MAX_DIMENSION = 256;
+const MAX_DIMENSION = 2048;
 const DEFAULT_DIMENSION = 64;
 // The size slider only stops at these round, classic pixel-art sizes (index-driven, see
 // availablePresets()) rather than dragging freely across the full range.
-const SIZE_PRESETS = [8, 16, 32, 64, 128, 256];
+const SIZE_PRESETS = [8, 16, 32, 64, 128, 256, 512, 1024, 2048];
 const CELL_PX = 8; // backing-store px per grid cell, fixed regardless of sprite size
 const TARGET_DISPLAY_EDGE = 560; // px -- auto-fit viewScale keeps the longer displayed edge near this
 const BRUSH_MIN = 1;

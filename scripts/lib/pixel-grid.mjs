@@ -17,10 +17,12 @@ export const PALETTE_HEX_PATH = join(ART_DIR, "palette.hex");
 export const EXPORTS_DIR = join(ROOT, "exports");
 
 // Sprite pixel-dimension bounds, shared by server.mjs's save/import validation. 8px keeps a grid
-// meaningful; 256px caps a sprite at 65,536 box-shadow entries -- the practical ceiling before
-// CSS painting gets heavy.
+// meaningful; 2048px lets the size slider reach large export/reference resolutions -- note that
+// as an actual CSS box-shadow sprite (not just a JSON/PNG/WebP/SCSS export), anything much past
+// 256px starts generating a LOT of box-shadow entries (2048x2048 is ~4.2 million), which gets
+// heavy for real browser CSS painting.
 export const MIN_DIMENSION = 8;
-export const MAX_DIMENSION = 256;
+export const MAX_DIMENSION = 2048;
 
 function hexToRgb(hex) {
   const n = Number.parseInt(hex.slice(1), 16);
