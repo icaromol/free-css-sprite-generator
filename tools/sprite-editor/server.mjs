@@ -5,7 +5,7 @@
 //
 // Usage: npm run sprite-editor  (or: node tools/sprite-editor/server.mjs)
 
-import { exec } from "node:child_process";
+import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { extname, join, sep } from "node:path";
@@ -424,7 +424,16 @@ const server = createServer(async (req, res) => {
 server.listen(PORT, "127.0.0.1", () => {
   const url = `http://localhost:${PORT}`;
   console.log(`Sprite editor running at ${url}`);
-  const openCmd =
-    process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
-  exec(`${openCmd} ${url}`, () => {});
+  // execFile with an argument array, not exec() with a shell string -- url is only ever built
+  // from a local PORT env var today, but there's no reason to have a shell-interpolation pattern
+  // sitting in the codebase for something this trivial. "start" is a cmd.exe built-in on Windows
+  // (not its own executable), hence the "cmd /c start" wrapper; the empty "" is the window-title
+  // arg start expects before its target -- without it, a target could be misread as the title.
+  const [cmd, args] =
+    process.platform === "darwin"
+      ? ["open", [url]]
+      : process.platform === "win32"
+        ? ["cmd", ["/c", "start", "", url]]
+        : ["xdg-open", [url]];
+  execFile(cmd, args, () => {});
 });
