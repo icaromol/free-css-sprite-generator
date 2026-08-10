@@ -411,7 +411,10 @@ const server = createServer(async (req, res) => {
   serveStatic(req, res);
 });
 
-server.listen(PORT, () => {
+// Explicit host: omitting it binds to all interfaces (0.0.0.0-equivalent), which would expose
+// this tool's unauthenticated read/write/delete API -- your sprite data and palette -- to anyone
+// else on the same network (public wifi, office LAN, etc). This is a local-only dev tool.
+server.listen(PORT, "127.0.0.1", () => {
   const url = `http://localhost:${PORT}`;
   console.log(`Sprite editor running at ${url}`);
   const openCmd =
