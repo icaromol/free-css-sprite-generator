@@ -17,6 +17,8 @@ CLAUDE.md
 .aider*
 .continue/
 .github/copilot-instructions.md
-art/
+art/*
+!art/legend.example.json
+!art/palette.example.hex
 exports/
 styles/sprites/

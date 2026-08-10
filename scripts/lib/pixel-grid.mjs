@@ -2,7 +2,7 @@
 // grid -> box-shadow CSS generation. Used by scripts/png-to-grid.mjs, scripts/build-sprites.mjs,
 // and tools/sprite-editor/server.mjs -- one implementation, not several drifting copies.
 
-import { readFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import sharp from "sharp";
@@ -12,6 +12,29 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 export const ART_DIR = join(ROOT, "art");
 export const LEGEND_PATH = join(ART_DIR, "legend.json");
 export const PALETTE_HEX_PATH = join(ART_DIR, "palette.hex");
+const LEGEND_EXAMPLE_PATH = join(ART_DIR, "legend.example.json");
+const PALETTE_HEX_EXAMPLE_PATH = join(ART_DIR, "palette.example.hex");
+
+// art/ is gitignored (it's per-project sprite data, not this repo's), so a fresh clone has no
+// legend.json/palette.hex for loadPaletteEntries() to read -- only the two tracked *.example.*
+// templates below. Seed the real files from those templates on first run instead of crashing;
+// after that they're the user's own to edit (the sprite editor's palette endpoints rewrite them
+// directly, and re-running this never overwrites files that already exist).
+function ensurePaletteFilesExist() {
+  mkdirSync(ART_DIR, { recursive: true });
+  if (!existsSync(LEGEND_PATH)) {
+    copyFileSync(LEGEND_EXAMPLE_PATH, LEGEND_PATH);
+    console.log(
+      `Created ${LEGEND_PATH} from legend.example.json (starter palette, no colors yet).`,
+    );
+  }
+  if (!existsSync(PALETTE_HEX_PATH)) {
+    copyFileSync(PALETTE_HEX_EXAMPLE_PATH, PALETTE_HEX_PATH);
+    console.log(
+      `Created ${PALETTE_HEX_PATH} from palette.example.hex (starter palette, no colors yet).`,
+    );
+  }
+}
 // Standalone exports (PNG/WebP/SCSS) from the sprite editor's "Export as" feature -- deliberately
 // separate from ART_DIR (the JSON source of truth) and styles/sprites/ (build-sprites.mjs's
 // generated pipeline output), so an export can never be mistaken for either.
@@ -179,6 +202,7 @@ function computeDerivedPaletteState() {
   LEGEND_HEX = new Map(PALETTE_ENTRIES.map((e) => [e.char, e.hex]));
 }
 
+ensurePaletteFilesExist();
 computeDerivedPaletteState();
 
 export function reloadPaletteFromDisk() {

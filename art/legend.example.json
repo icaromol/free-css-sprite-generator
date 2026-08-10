@@ -1,0 +1,4 @@
+{
+  "_comment": "Starter palette template -- ships with zero colors on purpose. Copied automatically to art/legend.json on first run if that file doesn't exist yet (see scripts/lib/pixel-grid.mjs). '.' is always transparent and must stay. Add colors either through the sprite editor's 'add new global color' form (it rewrites this file and art/palette.hex for you) or by hand -- just keep this file's key order in sync with palette.hex's line order. See docs/drawing-workflow.md.",
+  ".": null
+}
