@@ -4,6 +4,9 @@
   "description": "A local pixel-art sprite editor and CLI that converts images into pure-CSS box-shadow sprites -- no raster images, no canvas, no SVG.",
   "private": true,
   "license": "MIT",
+  "engines": {
+    "node": ">=20.9.0"
+  },
   "scripts": {
     "format": "biome format --write .",
     "lint": "biome lint .",
