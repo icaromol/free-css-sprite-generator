@@ -6,18 +6,18 @@
 // Usage: npm run sprite-editor  (or: node tools/sprite-editor/server.mjs)
 
 import { exec } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { extname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  ART_DIR,
   EXPORTS_DIR,
   exportPathFor,
   gridToScss,
   imageInputToGrid,
   isValidSpriteName,
   LEGEND_PATH,
+  loadAllSpriteRecords,
   MAX_DIMENSION,
   MIN_DIMENSION,
   nativeGridSize,
@@ -74,20 +74,6 @@ function readBody(req) {
     req.on("end", () => resolve(Buffer.concat(chunks)));
     req.on("error", reject);
   });
-}
-
-function loadAllSpriteRecords() {
-  return readdirSync(ART_DIR)
-    .filter((f) => f.endsWith(".json") && f !== "legend.json")
-    .map((f) => {
-      try {
-        const data = JSON.parse(readFileSync(join(ART_DIR, f), "utf8"));
-        return Array.isArray(data.rows) ? data : null;
-      } catch {
-        return null;
-      }
-    })
-    .filter(Boolean);
 }
 
 function listSprites() {

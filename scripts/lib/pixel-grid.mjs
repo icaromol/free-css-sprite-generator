@@ -2,7 +2,7 @@
 // grid -> box-shadow CSS generation. Used by scripts/png-to-grid.mjs, scripts/build-sprites.mjs,
 // and tools/sprite-editor/server.mjs -- one implementation, not several drifting copies.
 
-import { copyFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import sharp from "sharp";
@@ -385,6 +385,35 @@ export function exportPathFor(name, ext) {
   const resolved = resolve(EXPORTS_DIR, `${name}.${ext}`);
   if (!resolved.startsWith(EXPORTS_DIR + sep)) return null;
   return resolved;
+}
+
+const NON_SPRITE_JSON_FILES = new Set(["legend.json", "legend.example.json"]);
+
+// Reads every art/*.json sprite record, skipping the palette file(s) by name and skipping (with a
+// console.warn, not a throw) any file that fails to parse or doesn't look like a sprite (no `rows`
+// array) -- used by both tools/sprite-editor/server.mjs (so one malformed sprite never breaks
+// listing/using the others) and scripts/build-sprites.mjs (so one malformed sprite never blocks
+// compiling every other sprite's CSS). Previously each had its own copy of this with different
+// failure modes -- server.mjs's skipped bad files, build-sprites.mjs's didn't, so a single typo in
+// one sprite could take down the whole `npm run build:sprites` -- same "one implementation, not
+// several drifting copies" principle as everything else in this file.
+export function loadAllSpriteRecords() {
+  return readdirSync(ART_DIR)
+    .filter((f) => f.endsWith(".json") && !NON_SPRITE_JSON_FILES.has(f))
+    .map((f) => {
+      try {
+        const data = JSON.parse(readFileSync(join(ART_DIR, f), "utf8"));
+        if (!Array.isArray(data.rows)) {
+          console.warn(`Skipping art/${f}: no "rows" array -- not a sprite record?`);
+          return null;
+        }
+        return data;
+      } catch (err) {
+        console.warn(`Skipping art/${f}: ${err.message}`);
+        return null;
+      }
+    })
+    .filter(Boolean);
 }
 
 // Converts a { rows, localPalette } grid into an ordered list of box-shadow entries, one per

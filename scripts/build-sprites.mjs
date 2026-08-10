@@ -2,24 +2,17 @@
 // Reads every art/*.json sprite grid and generates the corresponding box-shadow CSS as SCSS
 // partials in styles/sprites/. Run via `npm run build:sprites` -- see README.md.
 
-import { mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ART_DIR, gridToBoxShadow, PALETTE_ENTRIES } from "./lib/pixel-grid.mjs";
+import { gridToBoxShadow, loadAllSpriteRecords, PALETTE_ENTRIES } from "./lib/pixel-grid.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SPRITES_DIR = join(ROOT, "styles", "sprites");
 const ABSTRACTS_DIR = join(ROOT, "styles", "abstracts");
 
 function loadSprites() {
-  const names = readdirSync(ART_DIR).filter((f) => f.endsWith(".json"));
-  const sprites = [];
-  for (const file of names) {
-    const data = JSON.parse(readFileSync(join(ART_DIR, file), "utf8"));
-    if (!Array.isArray(data.rows)) continue; // skips legend.json, which has no `rows`
-    sprites.push(data);
-  }
-  return sprites.sort((a, b) => a.name.localeCompare(b.name));
+  return loadAllSpriteRecords().sort((a, b) => a.name.localeCompare(b.name));
 }
 
 function scssFor(sprite) {
