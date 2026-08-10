@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import sharp from "sharp";
-import { clusterPixels, selectColorsToKeep } from "../../shared/color-reduce.mjs";
+import { clusterPixels, reduceCandidates } from "../../shared/color-reduce.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 export const ART_DIR = join(ROOT, "art");
@@ -277,10 +277,10 @@ export async function imageInputToGrid(input, { size = 64, colorMode = "precise"
   let reduction = null;
 
   // Pool exhausted (some pixel got `null` back from assign) -- reduce to the pool's capacity via
-  // shared/color-reduce.mjs: perceptually cluster the pixels, then keep the most useful `n`
-  // colors (frequency, with a small reserve for colors that are rare but visually distinct --
-  // see selectColorsToKeep's doc comment), same logic the editor's own color-simplify slider uses
-  // client-side (tools/sprite-editor/public/app.js's reduceColors) via the same shared module.
+  // shared/color-reduce.mjs: perceptually cluster the pixels, then merge down to `n` colors by
+  // always combining the most similar pair first (see reduceCandidates' doc comment), same logic
+  // the editor's own color-simplify slider uses client-side (tools/sprite-editor/public/app.js's
+  // reduceColors) via the same shared module.
   if (rows.some((row) => row.includes(null))) {
     const reduced = reduceToFit(pixels, LOCAL_CHAR_POOL.length);
     rows = reduced.rows;
@@ -302,11 +302,9 @@ export async function imageInputToGrid(input, { size = 64, colorMode = "precise"
 // shared/color-reduce.mjs (see its header comment for the full rationale) to: (1) perceptually
 // cluster pixels so near-identical colors coalesce into one group regardless of anti-aliasing
 // noise, instead of a fixed-grid quantization that can fragment them across several tiny buckets;
-// (2) keep the LOCAL_CHAR_POOL.length most useful clusters -- mostly by frequency, but with a
-// small reserve held back for colors that are rare yet visually distinct, so a deliberate accent
-// color doesn't lose every tie-break against a much larger, duller majority; (3) remap every
-// dropped cluster to its nearest *kept* cluster by perceptual (Lab Delta-E) distance, not raw RGB,
-// so an inevitable merge lands on something that actually looks similar.
+// (2) reduce to LOCAL_CHAR_POOL.length colors by always merging the most similar pair of clusters
+// first (reduceCandidates), so a distinct color is only ever sacrificed once nothing more similar
+// remains to consolidate instead -- not by how rare it is.
 function reduceToFit(pixels, maxLocalColors) {
   const rgbList = [];
   for (const row of pixels) {
@@ -319,14 +317,9 @@ function reduceToFit(pixels, maxLocalColors) {
     maxClusters: Math.max(256, maxLocalColors * 6),
   });
 
-  const candidates = clusters.map((c, i) => ({ rgb: c.rgb, count: c.count, clusterIndex: i }));
-  const { kept, nearestKept } = selectColorsToKeep(candidates, maxLocalColors);
-  const keptSet = new Set(kept.map((c) => c.clusterIndex));
-
-  // Resolve each dropped cluster's nearest kept cluster once -- cluster count, not pixel count.
-  const resolvedClusterRgb = clusters.map((c, i) =>
-    keptSet.has(i) ? c.rgb : nearestKept(c.rgb).rgb,
-  );
+  const candidates = clusters.map((c) => ({ rgb: c.rgb, count: c.count }));
+  const { kept, representativeOf } = reduceCandidates(candidates, maxLocalColors);
+  const resolvedClusterRgb = candidates.map((c) => representativeOf.get(c).rgb);
 
   const assigner = makeLocalPaletteAssigner();
   let pixelCursor = 0;

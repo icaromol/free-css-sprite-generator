@@ -4,7 +4,7 @@
 // slider below can share its perceptual-distance/selection logic with the server's import
 // pipeline instead of maintaining its own drifting copy -- see shared/color-reduce.mjs's header
 // comment for why that duplication used to be a real bug.
-import { selectColorsToKeep } from "/shared/color-reduce.mjs";
+import { reduceCandidates } from "/shared/color-reduce.mjs";
 
 // Keep in sync with scripts/lib/pixel-grid.mjs's MIN_DIMENSION/MAX_DIMENSION -- this is a
 // separate browser bundle with no shared import, so the ceiling is duplicated here.
@@ -923,12 +923,11 @@ function setColorCount(n) {
   colorCountValueEl.textContent = `${clamped} colors`;
 }
 
-// Reduces sourceRows to its N most-used colors, remapping every other pixel to its nearest kept
-// neighbor. Pure function of (sourceRows, n) -- doesn't touch `grid`/`sourceGrid` state, so
-// rebuildGridFromSource() can layer this on top of a spatial resample without the two transforms
-// stomping each other. Selection/matching logic lives in shared/color-reduce.mjs (see its header
-// comment) so a deliberate-but-rare accent color doesn't lose every tie-break against a much
-// larger, duller majority just because raw pixel count is all that's considered.
+// Reduces sourceRows to at most N colors by always merging the two most similar colors first, so
+// a distinct color is only ever sacrificed once nothing more similar remains to consolidate
+// instead of it (see shared/color-reduce.mjs's reduceCandidates doc comment). Pure function of
+// (sourceRows, n) -- doesn't touch `grid`/`sourceGrid` state, so rebuildGridFromSource() can layer
+// this on top of a spatial resample without the two transforms stomping each other.
 function reduceColors(sourceRows, n) {
   if (n >= colorCountMax) return sourceRows.map((row) => [...row]);
 
@@ -940,15 +939,13 @@ function reduceColors(sourceRows, n) {
     }
   }
   const candidates = [...counts.entries()].map(([ch, count]) => ({ ch, rgb: rgbFor(ch), count }));
-  const { kept, nearestKept } = selectColorsToKeep(candidates, n);
-  const keptSet = new Set(kept.map((c) => c.ch));
-  const remap = new Map();
+  const { representativeOf } = reduceCandidates(candidates, n);
+  const chToKeptCh = new Map(candidates.map((c) => [c.ch, representativeOf.get(c).ch]));
 
   return sourceRows.map((row) =>
     row.map((ch) => {
-      if (ch === "." || keptSet.has(ch)) return ch;
-      if (!remap.has(ch)) remap.set(ch, nearestKept(rgbFor(ch)).ch);
-      return remap.get(ch);
+      if (ch === ".") return ch;
+      return chToKeptCh.get(ch);
     }),
   );
 }

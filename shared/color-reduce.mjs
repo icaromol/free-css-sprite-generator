@@ -7,10 +7,10 @@
 // N most-used colors, remap the rest to the nearest survivor by raw RGB distance" logic
 // independently -- raw RGB distance doesn't separate lightness from hue/saturation, so a small
 // cluster of vivid pink pixels could get merged into a much bigger, differently-hued brown cluster
-// just because they weren't that numerically far apart. This module fixes both the metric (CIE Lab
-// distance) and the two failure modes raw frequency-ranking has on its own: near-identical colors
-// fragmenting into many tiny buckets instead of coalescing into one real cluster, and small-but-
-// visually-distinct color families losing every tie-break against a much larger, duller majority.
+// just because they weren't that numerically far apart. This module fixes the metric (CIE Lab
+// distance) and replaces frequency-ranking altogether: colors are reduced by always merging the
+// most similar pair first (see reduceCandidates below), so a distinct color is only ever sacrificed
+// once nothing more similar remains to consolidate instead of it -- not by how rare it is.
 
 // ---- sRGB -> CIE Lab (D65 white point) ----
 
@@ -182,96 +182,93 @@ export function clusterPixels(rgbList, { mergeDeltaE = 8, maxClusters = 512 } = 
   };
 }
 
-// ---- selection: keep the N most useful colors without letting frequency alone crowd out real diversity ----
+// ---- selection: merge the most similar colors first, so distinct colors are the last thing touched ----
 
-// Picks up to `maxCount` representative colors from `candidates` ({ rgb, count, ...anything }).
-// Extra properties on a candidate are preserved on the returned objects, so a caller can stash an
-// opaque id (e.g. a cluster index) and get it back unchanged.
+// Reduces `candidates` ({ rgb, count, ...anything }) to at most `maxCount` colors by repeatedly
+// merging the two most similar remaining colors -- agglomerative clustering using Ward's linkage,
+// not a frequency-ranked keep-list. This is a structural guarantee rather than a heuristic: at
+// every step, the two things merged are provably the closest pair that currently exists, so a
+// color only ever gets merged away once there's nothing more similar left to consolidate instead.
+// A rare-but-distinct accent color (a handful of pixels, even just one) survives for exactly the
+// same reason a common one does -- there's no separate "frequency" tier it has to out-rank first.
 //
-// Plain top-N-by-frequency (the previous behavior everywhere this ran) starves any color family
-// that's real but numerically rare -- a handful of pixels (even just one) of a deliberate accent
-// color, up against a much larger, duller majority, always loses every tie-break. `rescueFraction`
-// of the slots are held back for a second pass: among the leftover candidates (at least
-// `minRescueCount` pixels each), whichever are most perceptually distinct (by Lab Delta-E) from
-// everything already kept get first claim on those slots. `minRescueCount` defaults to 1 rather
-// than filtering small counts outright, because the Delta-E cut already does the real noise
-// filtering: true anti-aliasing/compression artifacts are almost always color-close to the
-// majority pixel they came from, so they fail the distinctness threshold on their own merit,
-// whereas a single genuinely distinct pixel (a real 1px accent) deserves to survive. Any rescue
-// slots that can't be filled (not enough sufficiently-distinct candidates) backfill by frequency
-// as before, so this never keeps fewer colors than plain top-N would.
-export function selectColorsToKeep(
-  candidates,
-  maxCount,
-  { rescueFraction = 0.15, minRescueCount = 1, rescueDeltaE = 15 } = {},
-) {
-  const chosen =
-    candidates.length <= maxCount
-      ? [...candidates]
-      : pickWithRescue(candidates, maxCount, { rescueFraction, minRescueCount, rescueDeltaE });
+// Merge cost between two clusters uses Ward's formula --
+// `(countA * countB / (countA + countB)) * deltaE76(centroidA, centroidB) ** 2` -- rather than
+// plain centroid distance. Plain nearest-centroid merging can invert: after merging two small
+// clusters, the new (still fairly light) centroid can land closer to some large, genuinely
+// distinct cluster than either original one was, pulling that large cluster in too early. Ward's
+// cost weighting keeps merges between low-mass clusters cheap and merges between two substantial,
+// roughly-equal-mass clusters expensive, so it favors consolidating subtones over collapsing
+// distinct color families even when their raw centroid distance would suggest otherwise.
+//
+// No pixel-count floor gates what's "distinct enough to survive" -- a true anti-aliasing/
+// compression artifact is, by definition, Lab-close to the majority color it came from, so it
+// merges away in an early round on its own merit. Gating by count would just reintroduce a
+// frequency bias by another name.
+//
+// Every original candidate ends up in exactly one final cluster by construction. Extra properties
+// on a candidate are preserved (the returned medoids and the map's keys/values are the original
+// candidate objects), so a caller can stash an opaque id (e.g. a cluster index, or a grid char)
+// and get it back unchanged. `kept` colors are always an original candidate's own rgb (its
+// cluster's highest-count member, its "medoid"), never a synthetic blended average -- callers
+// like the sprite editor's simplify slider can only relabel pixels onto a color that already
+// exists in the grid, not invent a new one, so this keeps both callers on the same footing.
+export function reduceCandidates(candidates, maxCount) {
+  if (candidates.length <= maxCount) {
+    return { kept: [...candidates], representativeOf: new Map(candidates.map((c) => [c, c])) };
+  }
 
-  const chosenLabs = chosen.map((c) => rgbToLab(...c.rgb));
-  const nearestKept = (rgb) => {
-    if (chosen.length === 0) return null;
-    const lab = rgbToLab(...rgb);
-    let best = chosen[0];
-    let bestDist = Number.POSITIVE_INFINITY;
-    chosen.forEach((c, i) => {
-      const dist = deltaE76(lab, chosenLabs[i]);
-      if (dist < bestDist) {
-        bestDist = dist;
-        best = c;
-      }
-    });
-    return best;
+  const clusters = candidates.map((c) => ({
+    rgb: c.rgb,
+    count: c.count,
+    lab: rgbToLab(...c.rgb),
+    members: [c],
+  }));
+
+  const wardCost = (a, b) => {
+    const d = deltaE76(a.lab, b.lab);
+    return ((a.count * b.count) / (a.count + b.count)) * d * d;
   };
 
-  return { kept: chosen, nearestKept };
-}
-
-function pickWithRescue(candidates, maxCount, { rescueFraction, minRescueCount, rescueDeltaE }) {
-  const sorted = [...candidates].sort((a, b) => b.count - a.count);
-  const rescueSlots = Math.min(sorted.length, Math.max(1, Math.round(maxCount * rescueFraction)));
-  const frequencySlots = maxCount - rescueSlots;
-
-  const kept = sorted.slice(0, frequencySlots);
-  const keptLabs = kept.map((c) => rgbToLab(...c.rgb));
-  const remaining = sorted.slice(frequencySlots);
-
-  const rescueCandidates = remaining
-    .filter((c) => c.count >= minRescueCount)
-    .map((c) => {
-      const lab = rgbToLab(...c.rgb);
-      const dist = keptLabs.reduce(
-        (min, k) => Math.min(min, deltaE76(lab, k)),
-        Number.POSITIVE_INFINITY,
-      );
-      return { candidate: c, lab, dist };
-    })
-    .filter((s) => s.dist >= rescueDeltaE)
-    .sort((a, b) => b.dist - a.dist); // most visually distinct from the frequency-kept set first
-
-  const rescued = [];
-  for (const s of rescueCandidates) {
-    if (rescued.length >= rescueSlots) break;
-    // Re-check against the growing kept set (including colors already rescued this pass) so two
-    // similar outliers don't both get rescued at the expense of a legitimately common color.
-    const currentDist = keptLabs.reduce(
-      (min, k) => Math.min(min, deltaE76(s.lab, k)),
-      Number.POSITIVE_INFINITY,
-    );
-    if (currentDist < rescueDeltaE) continue;
-    rescued.push(s.candidate);
-    keptLabs.push(s.lab);
-  }
-
-  const chosen = [...kept, ...rescued];
-  if (chosen.length < maxCount) {
-    const chosenSet = new Set(chosen);
-    for (const c of remaining) {
-      if (chosen.length >= maxCount) break;
-      if (!chosenSet.has(c)) chosen.push(c);
+  while (clusters.length > maxCount) {
+    let bestI = 0;
+    let bestJ = 1;
+    let bestCost = Number.POSITIVE_INFINITY;
+    for (let i = 0; i < clusters.length; i++) {
+      for (let j = i + 1; j < clusters.length; j++) {
+        const cost = wardCost(clusters[i], clusters[j]);
+        if (cost < bestCost) {
+          bestCost = cost;
+          bestI = i;
+          bestJ = j;
+        }
+      }
     }
+
+    const a = clusters[bestI];
+    const b = clusters[bestJ];
+    const mergedCount = a.count + b.count;
+    const mergedRgb = [0, 1, 2].map((k) => (a.rgb[k] * a.count + b.rgb[k] * b.count) / mergedCount);
+    const merged = {
+      rgb: mergedRgb,
+      count: mergedCount,
+      lab: rgbToLab(...mergedRgb),
+      members: [...a.members, ...b.members],
+    };
+
+    // Splice the higher index first so removing it doesn't shift bestI out from under the second splice.
+    clusters.splice(bestJ, 1);
+    clusters.splice(bestI, 1);
+    clusters.push(merged);
   }
-  return chosen;
+
+  const kept = [];
+  const representativeOf = new Map();
+  for (const cluster of clusters) {
+    const medoid = cluster.members.reduce((best, m) => (m.count > best.count ? m : best));
+    kept.push(medoid);
+    for (const m of cluster.members) representativeOf.set(m, medoid);
+  }
+
+  return { kept, representativeOf };
 }
