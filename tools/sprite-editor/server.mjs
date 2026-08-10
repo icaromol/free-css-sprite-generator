@@ -32,6 +32,20 @@ const PORT = Number.parseInt(process.env.PORT ?? "5787", 10);
 const PUBLIC_DIR = join(fileURLToPath(new URL(".", import.meta.url)), "public");
 const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
 
+// The color-simplify slider in public/app.js imports its perceptual-distance/clustering logic
+// from shared/color-reduce.mjs -- the same module scripts/lib/pixel-grid.mjs uses server-side for
+// the import pipeline, so the two never drift into two different "keep top-N" implementations
+// again. That file lives outside PUBLIC_DIR (it's shared with Node, not editor-only), so it needs
+// one explicit route rather than widening serveStatic's path-traversal surface with a second
+// static root.
+const SHARED_COLOR_REDUCE_PATH = join(
+  fileURLToPath(new URL(".", import.meta.url)),
+  "..",
+  "..",
+  "shared",
+  "color-reduce.mjs",
+);
+
 const CONTENT_TYPES = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
@@ -322,6 +336,7 @@ async function handleApi(req, res, url) {
         rows: grid.rows,
         localPalette: grid.localPalette,
         colorMode: grid.colorMode,
+        reduction: grid.reduction,
       });
     } catch (err) {
       sendJson(res, 400, { error: `couldn't decode image: ${err.message}` });
@@ -383,6 +398,11 @@ async function handleApi(req, res, url) {
 
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
+  if (url.pathname === "/shared/color-reduce.mjs") {
+    res.writeHead(200, { "Content-Type": "text/javascript; charset=utf-8" });
+    res.end(readFileSync(SHARED_COLOR_REDUCE_PATH));
+    return;
+  }
   if (url.pathname.startsWith("/api/")) {
     const handled = await handleApi(req, res, url);
     if (!handled) sendJson(res, 404, { error: "not found" });

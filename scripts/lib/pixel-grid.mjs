@@ -6,6 +6,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import sharp from "sharp";
+import { clusterPixels, selectColorsToKeep } from "../../shared/color-reduce.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 export const ART_DIR = join(ROOT, "art");
@@ -158,6 +159,7 @@ const LOCAL_CHAR_POOL_SOURCE = "aejlnoqrtvxyzADEHIJKLMNOQRTVXYZ0123456789";
 let GLOBAL_CHARS;
 let LOCAL_CHAR_POOL;
 let LEGEND_CSS_VAR;
+let LEGEND_HEX;
 
 // Recomputes every value derived from legend.json/palette.hex -- called once at module load and
 // again by reloadPaletteFromDisk() after the sprite editor's palette add/delete endpoints rewrite
@@ -174,6 +176,7 @@ function computeDerivedPaletteState() {
     CONFORM_ACHROMATIC_VARS.has(e.cssVar),
   ).map((e) => ({ ...e, hsl: rgbToHsl(...e.rgb) }));
   LEGEND_CSS_VAR = new Map(PALETTE_ENTRIES.map((e) => [e.char, e.cssVar]));
+  LEGEND_HEX = new Map(PALETTE_ENTRIES.map((e) => [e.char, e.hex]));
 }
 
 computeDerivedPaletteState();
@@ -247,7 +250,7 @@ export async function imageInputToGrid(input, { size = 64, colorMode = "precise"
   const unpremultiply = (channel, alpha) =>
     alpha === 0 || alpha === 255 ? channel : Math.min(255, Math.round((channel * 255) / alpha));
 
-  let assigner = makeLocalPaletteAssigner();
+  const assigner = makeLocalPaletteAssigner();
   const pixels = [];
   for (let y = 0; y < info.height; y++) {
     const row = [];
@@ -270,102 +273,77 @@ export async function imageInputToGrid(input, { size = 64, colorMode = "precise"
   }
 
   let rows = pixels.map((row) => row.map((p) => (p ? assigner.assign(...p) : ".")));
+  let localPalette = assigner.localPalette;
+  let reduction = null;
 
-  // Pool exhausted (some pixel got `null` back from assign) -- reduce to the pool's capacity by
-  // keeping the most-frequent colors and remapping the rest to their nearest kept neighbor,
-  // same "keep top-N" strategy as the editor's own color-simplify slider.
+  // Pool exhausted (some pixel got `null` back from assign) -- reduce to the pool's capacity via
+  // shared/color-reduce.mjs: perceptually cluster the pixels, then keep the most useful `n`
+  // colors (frequency, with a small reserve for colors that are rare but visually distinct --
+  // see selectColorsToKeep's doc comment), same logic the editor's own color-simplify slider uses
+  // client-side (tools/sprite-editor/public/app.js's reduceColors) via the same shared module.
   if (rows.some((row) => row.includes(null))) {
-    rows = reduceToFit(pixels, LOCAL_CHAR_POOL.length);
-    assigner = null; // localPalette below comes from reduceToFit's own assigner in that branch
+    const reduced = reduceToFit(pixels, LOCAL_CHAR_POOL.length);
+    rows = reduced.rows;
+    localPalette = reduced.localPalette;
+    reduction = reduced.reduction;
   }
 
   return {
     width: info.width,
     height: info.height,
     rows: rows.map((row) => row.join("")),
-    localPalette: assigner ? assigner.localPalette : rows.localPalette,
+    localPalette,
     colorMode,
+    reduction,
   };
 }
 
-// Fallback for sources with more distinct colors than LOCAL_CHAR_POOL can hold: count frequency,
-// keep the LOCAL_CHAR_POOL.length most-used colors (plus whatever already maps to a global
-// token, which doesn't cost pool space), remap every other pixel to its nearest kept color.
-// Groups colors into coarse buckets before ranking by frequency -- anti-aliased/softly-shaded
-// source art can produce hundreds of near-identical exact RGB values along every edge, and exact
-// -match frequency counting treats each as a separate, low-count color. That lets a whole smoothly
-// -shaded region (e.g. red tomato bits with soft edges) lose out entirely to a smaller but
-// perfectly uniform region (a crisp black outline), even though "reddish" pixels vastly outnumber
-// "black" ones in aggregate. A ~24-value bucket per channel merges anti-aliasing noise into one
-// color family while still keeping real distinctions (red vs. cream vs. black) apart.
-const QUANTIZE_STEP = 24;
-
-function quantizeKey(r, g, b) {
-  return [
-    Math.round(r / QUANTIZE_STEP),
-    Math.round(g / QUANTIZE_STEP),
-    Math.round(b / QUANTIZE_STEP),
-  ].join(",");
-}
-
+// Fallback for sources with more distinct colors than LOCAL_CHAR_POOL can hold. Uses
+// shared/color-reduce.mjs (see its header comment for the full rationale) to: (1) perceptually
+// cluster pixels so near-identical colors coalesce into one group regardless of anti-aliasing
+// noise, instead of a fixed-grid quantization that can fragment them across several tiny buckets;
+// (2) keep the LOCAL_CHAR_POOL.length most useful clusters -- mostly by frequency, but with a
+// small reserve held back for colors that are rare yet visually distinct, so a deliberate accent
+// color doesn't lose every tie-break against a much larger, duller majority; (3) remap every
+// dropped cluster to its nearest *kept* cluster by perceptual (Lab Delta-E) distance, not raw RGB,
+// so an inevitable merge lands on something that actually looks similar.
 function reduceToFit(pixels, maxLocalColors) {
-  const buckets = new Map(); // quantizeKey -> { count, rSum, gSum, bSum }
+  const rgbList = [];
   for (const row of pixels) {
     for (const p of row) {
-      if (!p) continue;
-      const [r, g, b] = p;
-      const key = quantizeKey(r, g, b);
-      const bucket = buckets.get(key) ?? { count: 0, rSum: 0, gSum: 0, bSum: 0 };
-      bucket.count++;
-      bucket.rSum += r;
-      bucket.gSum += g;
-      bucket.bSum += b;
-      buckets.set(key, bucket);
+      if (p) rgbList.push(p);
     }
   }
 
-  // Each kept bucket's representative color is the average of the pixels that landed in it, not
-  // an arbitrary member -- a stable, de-noised stand-in for that whole color family.
-  const kept = [...buckets.entries()]
-    .sort((a, b) => b[1].count - a[1].count)
-    .slice(0, maxLocalColors)
-    .map(([key, bucket]) => ({
-      key,
-      rgb: [
-        Math.round(bucket.rSum / bucket.count),
-        Math.round(bucket.gSum / bucket.count),
-        Math.round(bucket.bSum / bucket.count),
-      ],
-    }));
-  const keptByKey = new Map(kept.map((k) => [k.key, k.rgb]));
+  const { clusterIndexForPixel, clusters } = clusterPixels(rgbList, {
+    maxClusters: Math.max(256, maxLocalColors * 6),
+  });
+
+  const candidates = clusters.map((c, i) => ({ rgb: c.rgb, count: c.count, clusterIndex: i }));
+  const { kept, nearestKept } = selectColorsToKeep(candidates, maxLocalColors);
+  const keptSet = new Set(kept.map((c) => c.clusterIndex));
+
+  // Resolve each dropped cluster's nearest kept cluster once -- cluster count, not pixel count.
+  const resolvedClusterRgb = clusters.map((c, i) =>
+    keptSet.has(i) ? c.rgb : nearestKept(c.rgb).rgb,
+  );
 
   const assigner = makeLocalPaletteAssigner();
-  for (const { rgb } of kept) assigner.assign(...rgb);
-
-  const nearestKept = (r, g, b) => {
-    let best = kept[0].rgb;
-    let bestDist = Number.POSITIVE_INFINITY;
-    for (const { rgb: k } of kept) {
-      const dist = (r - k[0]) ** 2 + (g - k[1]) ** 2 + (b - k[2]) ** 2;
-      if (dist < bestDist) {
-        bestDist = dist;
-        best = k;
-      }
-    }
-    return best;
-  };
-
+  let pixelCursor = 0;
   const rows = pixels.map((row) =>
     row.map((p) => {
       if (!p) return ".";
-      const [r, g, b] = p;
-      const bucketRgb = keptByKey.get(quantizeKey(r, g, b));
-      if (bucketRgb) return assigner.assign(...bucketRgb);
-      return assigner.assign(...nearestKept(r, g, b));
+      const clusterIndex = clusterIndexForPixel[pixelCursor++];
+      const [r, g, b] = resolvedClusterRgb[clusterIndex];
+      return assigner.assign(r, g, b);
     }),
   );
-  rows.localPalette = assigner.localPalette;
-  return rows;
+
+  return {
+    rows,
+    localPalette: assigner.localPalette,
+    reduction: { before: clusters.length, after: kept.length },
+  };
 }
 
 const SPRITE_NAME_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
@@ -393,16 +371,25 @@ export function exportPathFor(name, ext) {
 }
 
 // Converts a { rows, localPalette } grid into an ordered list of box-shadow entries, one per
-// non-transparent pixel. Global-palette pixels use `var(--color-x)` (one edit point restyles
-// every sprite); local-palette pixels (from imageInputToGrid's precise/conform modes) use their
-// raw hex directly, since by definition they aren't one of the shared tokens.
-export function gridToBoxShadow({ rows, localPalette }) {
+// non-transparent pixel. By default, global-palette pixels use `var(--color-x)` (one edit point
+// restyles every sprite) -- this is what scripts/build-sprites.mjs uses, always paired with the
+// `:root` block it also generates in styles/abstracts/_palette-tokens.scss, so the variables
+// actually resolve. Pass `{ hexOnly: true }` to force every entry to a literal hex value instead
+// (used by gridToScss's standalone single-file export below): box-shadow is a single list-valued
+// property, so even one entry referencing an undefined custom property invalidates the ENTIRE
+// declaration at computed-value time -- not just that pixel, the whole sprite disappears. A
+// standalone export that isn't guaranteed to ship alongside _palette-tokens.scss must never emit
+// var() for exactly that reason. Local-palette pixels (from imageInputToGrid's precise/conform
+// modes) always use their own raw hex regardless, since by definition they aren't shared tokens.
+export function gridToBoxShadow({ rows, localPalette }, { hexOnly = false } = {}) {
   const entries = [];
   rows.forEach((row, y) => {
     [...row].forEach((ch, x) => {
       const cssVar = LEGEND_CSS_VAR.get(ch);
-      if (cssVar) {
+      if (cssVar && !hexOnly) {
         entries.push(`${x}px ${y}px var(${cssVar})`);
+      } else if (cssVar && hexOnly) {
+        entries.push(`${x}px ${y}px ${LEGEND_HEX.get(ch)}`);
       } else if (localPalette?.[ch]) {
         entries.push(`${x}px ${y}px ${localPalette[ch]}`);
       }
@@ -427,7 +414,8 @@ export function gridToRgba({ rows, localPalette }) {
     for (let x = 0; x < width; x++) {
       const ch = row[x];
       if (ch === ".") continue;
-      const rgb = globalRgbByChar.get(ch) ?? (localPalette?.[ch] ? hexToRgb(localPalette[ch]) : null);
+      const rgb =
+        globalRgbByChar.get(ch) ?? (localPalette?.[ch] ? hexToRgb(localPalette[ch]) : null);
       if (!rgb) continue;
       const idx = (y * width + x) * 4;
       buffer[idx] = rgb[0];
@@ -443,7 +431,9 @@ export function gridToRgba({ rows, localPalette }) {
 // directly for the sprite editor's standalone SCSS export (exports/<name>.scss) instead of
 // duplicating the template.
 export function gridToScss({ name, rows, localPalette }) {
-  const entries = gridToBoxShadow({ rows, localPalette });
+  // hexOnly: true -- this file is meant to be dropped into any project standalone (see
+  // gridToBoxShadow's comment above), so it can never depend on a `:root` block it doesn't ship.
+  const entries = gridToBoxShadow({ rows, localPalette }, { hexOnly: true });
   const body = entries.length > 0 ? entries.join(",\n    ") : "none";
   return `.sprite-${name} {\n  box-shadow:\n    ${body};\n}\n`;
 }

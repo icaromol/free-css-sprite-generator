@@ -1,6 +1,10 @@
 // Sprite editor client -- see README.md and docs/drawing-workflow.md. Plain vanilla JS, no
 // build step, no framework: there's no reason to reach for more machinery than a pixel-grid
-// paint tool needs.
+// paint tool needs. Loaded as an ES module (see index.html) specifically so the color-simplify
+// slider below can share its perceptual-distance/selection logic with the server's import
+// pipeline instead of maintaining its own drifting copy -- see shared/color-reduce.mjs's header
+// comment for why that duplication used to be a real bug.
+import { selectColorsToKeep } from "/shared/color-reduce.mjs";
 
 // Keep in sync with scripts/lib/pixel-grid.mjs's MIN_DIMENSION/MAX_DIMENSION -- this is a
 // separate browser bundle with no shared import, so the ceiling is duplicated here.
@@ -561,10 +565,18 @@ async function performImport(file, { asNew }) {
     syncSizeSlider();
     const localCount = Object.keys(data.localPalette).length;
     const modeLabel = mode === "conform" ? "conform to palette" : "precise";
+    // data.reduction is only set when the source had more distinct colors than the local-palette
+    // pool could hold and some had to be merged away -- surfaced here so that's never silent (see
+    // shared/color-reduce.mjs).
+    const reductionNote =
+      data.reduction && data.reduction.before !== data.reduction.after
+        ? ` Reduced from ${data.reduction.before} to ${data.reduction.after} colors to fit the local-palette limit.`
+        : "";
     setStatus(
-      localCount > 0
+      (localCount > 0
         ? `Imported (${modeLabel}, ${width}×${height}) — ${localCount} color(s) unique to this image.`
-        : `Imported (${modeLabel}, ${width}×${height}) — every pixel matched the shared palette.`,
+        : `Imported (${modeLabel}, ${width}×${height}) — every pixel matched the shared palette.`) +
+        reductionNote,
     );
     refresh();
   } catch (err) {
@@ -914,7 +926,9 @@ function setColorCount(n) {
 // Reduces sourceRows to its N most-used colors, remapping every other pixel to its nearest kept
 // neighbor. Pure function of (sourceRows, n) -- doesn't touch `grid`/`sourceGrid` state, so
 // rebuildGridFromSource() can layer this on top of a spatial resample without the two transforms
-// stomping each other.
+// stomping each other. Selection/matching logic lives in shared/color-reduce.mjs (see its header
+// comment) so a deliberate-but-rare accent color doesn't lose every tie-break against a much
+// larger, duller majority just because raw pixel count is all that's considered.
 function reduceColors(sourceRows, n) {
   if (n >= colorCountMax) return sourceRows.map((row) => [...row]);
 
@@ -925,32 +939,15 @@ function reduceColors(sourceRows, n) {
       counts.set(ch, (counts.get(ch) ?? 0) + 1);
     }
   }
-  const kept = [...counts.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, n)
-    .map(([ch]) => ch);
-  const keptSet = new Set(kept);
-
-  const nearestKept = (ch) => {
-    const [r, g, b] = rgbFor(ch);
-    let best = ch;
-    let bestDist = Number.POSITIVE_INFINITY;
-    for (const candidate of kept) {
-      const [cr, cg, cb] = rgbFor(candidate);
-      const dist = (r - cr) ** 2 + (g - cg) ** 2 + (b - cb) ** 2;
-      if (dist < bestDist) {
-        bestDist = dist;
-        best = candidate;
-      }
-    }
-    return best;
-  };
+  const candidates = [...counts.entries()].map(([ch, count]) => ({ ch, rgb: rgbFor(ch), count }));
+  const { kept, nearestKept } = selectColorsToKeep(candidates, n);
+  const keptSet = new Set(kept.map((c) => c.ch));
   const remap = new Map();
 
   return sourceRows.map((row) =>
     row.map((ch) => {
       if (ch === "." || keptSet.has(ch)) return ch;
-      if (!remap.has(ch)) remap.set(ch, nearestKept(ch));
+      if (!remap.has(ch)) remap.set(ch, nearestKept(rgbFor(ch)).ch);
       return remap.get(ch);
     }),
   );

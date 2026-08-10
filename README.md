@@ -36,6 +36,12 @@ text you can diff in git.
 - **`scripts/lib/pixel-grid.mjs`** — the shared pipeline underneath both (palette loading, image →
   grid conversion, grid → `box-shadow` generation). Not meant to be used directly, but readable if
   you want to understand or extend the pipeline.
+- **`shared/color-reduce.mjs`** — perceptual color clustering/palette-reduction (used when a
+  source image has more distinct colors than a sprite's local-palette slots can hold). Lives
+  outside `scripts/lib/` specifically because it's shared with the *browser*, not just between
+  Node scripts: the sprite editor's color-simplify slider imports it directly (served by
+  `tools/sprite-editor/server.mjs` at `/shared/color-reduce.mjs`), so it has zero Node-only
+  imports by design.
 - **`art/legend.json` + `art/palette.hex`** — the shipped example palette (20 colors). Swap these
   two files for your own to use different colors — see
   [docs/drawing-workflow.md](docs/drawing-workflow.md#using-your-own-palette-instead-of-the-shipped-example).
