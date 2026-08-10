@@ -23,7 +23,13 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { PNG } from "pngjs";
-import { ART_DIR, imageInputToGrid, PALETTE_ENTRIES } from "./lib/pixel-grid.mjs";
+import {
+  ART_DIR,
+  imageInputToGrid,
+  MAX_DIMENSION,
+  MIN_DIMENSION,
+  PALETTE_ENTRIES,
+} from "./lib/pixel-grid.mjs";
 
 const GLOBAL_HEX = new Map(PALETTE_ENTRIES.map((e) => [e.char, e.hex]));
 
@@ -67,10 +73,23 @@ function writeDebugPng(spriteName, { width, height, rows, localPalette }) {
 
 async function main() {
   const { inputPath, spriteName, opts } = parseArgs(process.argv.slice(2));
+  const usage =
+    "Usage: node scripts/png-to-grid.mjs <input.png> <sprite-name> [--size=64] [--mode=precise|conform] [--debug]";
   if (!inputPath || !spriteName) {
+    console.error(usage);
+    process.exit(1);
+  }
+  // Without this, a bad --size (0, negative, non-numeric, or past MAX_DIMENSION) reached sharp's
+  // resize() directly and surfaced as a raw, unrelated-looking internal error instead of a clear
+  // CLI usage message.
+  if (!Number.isInteger(opts.size) || opts.size < MIN_DIMENSION || opts.size > MAX_DIMENSION) {
     console.error(
-      "Usage: node scripts/png-to-grid.mjs <input.png> <sprite-name> [--size=64] [--mode=precise|conform] [--debug]",
+      `--size must be an integer between ${MIN_DIMENSION} and ${MAX_DIMENSION} (got "${opts.size}").\n${usage}`,
     );
+    process.exit(1);
+  }
+  if (opts.colorMode !== "precise" && opts.colorMode !== "conform") {
+    console.error(`--mode must be "precise" or "conform" (got "${opts.colorMode}").\n${usage}`);
     process.exit(1);
   }
 
