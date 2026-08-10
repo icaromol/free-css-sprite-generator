@@ -7,7 +7,7 @@ build/
 .env.*
 !.env.example
 CLAUDE.md
-.husky/
+.husky/_
 .claude/
 .cursor/
 .cursorrules
