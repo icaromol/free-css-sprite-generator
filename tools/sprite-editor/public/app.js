@@ -23,38 +23,54 @@ const VIEW_SCALE_MAX = 4;
 const VIEW_ZOOM_STEP = 1.15;
 const COLOR_COUNT_MIN = 2;
 
-const canvas = document.getElementById("grid-canvas");
+// JSDoc casts below (not plain document.getElementById calls) exist purely so `npm run typecheck`
+// knows these are their specific HTMLElement subtypes, not the generic base type -- getElementById
+// always returns plain `HTMLElement | null` regardless of what's actually at that id. No runtime
+// effect at all; a type-only annotation, same as the rest of this file's checkJs coverage.
+const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById("grid-canvas"));
 const ctx = canvas.getContext("2d");
 const paletteEl = document.getElementById("palette-swatches");
 const localPaletteSection = document.getElementById("local-palette-section");
 const localSwatchesEl = document.getElementById("local-swatches");
 const cssPreviewEl = document.getElementById("css-preview");
-const spriteSelect = document.getElementById("sprite-select");
-const nameInput = document.getElementById("sprite-name");
+const spriteSelect = /** @type {HTMLSelectElement} */ (document.getElementById("sprite-select"));
+const nameInput = /** @type {HTMLInputElement} */ (document.getElementById("sprite-name"));
 const saveBtn = document.getElementById("save-btn");
-const importReplaceInput = document.getElementById("import-replace-input");
-const importNewInput = document.getElementById("import-new-input");
-const importModeSelect = document.getElementById("import-mode");
+const importReplaceInput = /** @type {HTMLInputElement} */ (
+  document.getElementById("import-replace-input")
+);
+const importNewInput = /** @type {HTMLInputElement} */ (
+  document.getElementById("import-new-input")
+);
+const importModeSelect = /** @type {HTMLSelectElement} */ (
+  document.getElementById("import-mode")
+);
 const removeBgBtn = document.getElementById("remove-bg-btn");
 const maximizeBtn = document.getElementById("maximize-btn");
 const fitToArtBtn = document.getElementById("fit-to-art-btn");
 const statusEl = document.getElementById("status");
-const brushSizeInput = document.getElementById("brush-size");
+const brushSizeInput = /** @type {HTMLInputElement} */ (document.getElementById("brush-size"));
 const brushSizeValueEl = document.getElementById("brush-size-value");
-const colorCountInput = document.getElementById("color-count");
+const colorCountInput = /** @type {HTMLInputElement} */ (
+  document.getElementById("color-count")
+);
 const colorCountValueEl = document.getElementById("color-count-value");
-const sizeInput = document.getElementById("sprite-size");
+const sizeInput = /** @type {HTMLInputElement} */ (document.getElementById("sprite-size"));
 const sizeValueEl = document.getElementById("sprite-size-value");
 const dimensionHintEl = document.getElementById("dimension-hint");
 const paletteAddToggleBtn = document.getElementById("palette-add-toggle");
 const paletteAddFormEl = document.getElementById("palette-add-form");
-const paletteAddColorInput = document.getElementById("palette-add-color");
-const paletteAddLabelInput = document.getElementById("palette-add-label");
+const paletteAddColorInput = /** @type {HTMLInputElement} */ (
+  document.getElementById("palette-add-color")
+);
+const paletteAddLabelInput = /** @type {HTMLInputElement} */ (
+  document.getElementById("palette-add-label")
+);
 const paletteAddConfirmBtn = document.getElementById("palette-add-confirm");
 const paletteAddCancelBtn = document.getElementById("palette-add-cancel");
-const zoomInput = document.getElementById("view-zoom");
+const zoomInput = /** @type {HTMLInputElement} */ (document.getElementById("view-zoom"));
 const zoomValueEl = document.getElementById("view-zoom-value");
-const exportSelect = document.getElementById("export-select");
+const exportSelect = /** @type {HTMLSelectElement} */ (document.getElementById("export-select"));
 
 let globalPalette = []; // [{ char, hex, cssVar, rgb }] -- the shared tokens, from /api/palette
 let globalHexByChar = new Map();

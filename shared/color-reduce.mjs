@@ -27,6 +27,12 @@ function labF(t) {
   return t > delta ** 3 ? Math.cbrt(t) : t / (3 * delta * delta) + 4 / 29;
 }
 
+/**
+ * @typedef {[number, number, number]} Lab
+ * @typedef {[number, number, number]} RGB
+ */
+
+/** @param {number} r @param {number} g @param {number} b @returns {Lab} */
 export function rgbToLab(r, g, b) {
   const rl = srgbToLinear(r);
   const gl = srgbToLinear(g);
@@ -48,6 +54,7 @@ export function rgbToLab(r, g, b) {
 // well-understood improvement over raw RGB distance for a fraction of the code -- good enough to
 // fix "pink getting confused for brown" without pulling in a much heavier formula this tool's
 // failure modes don't need.
+/** @param {Lab} labA @param {Lab} labB @returns {number} */
 export function deltaE76(labA, labB) {
   const dl = labA[0] - labB[0];
   const da = labA[1] - labB[1];
@@ -110,8 +117,17 @@ function removeFromHash(hashIndex, key, clusterIndex) {
 // still catches pixels straddling a coarse hash boundary (mergeDeltaE is small relative to
 // HASH_STEP), which is the exact fragmentation failure mode this function exists to avoid; it's a
 // deliberate speed/exactness tradeoff, not a guarantee that no near-duplicate is ever missed.
+/**
+ * @param {RGB[]} rgbList
+ * @param {{ mergeDeltaE?: number, maxClusters?: number }} [options]
+ * @returns {{
+ *   clusterIndexForPixel: number[],
+ *   clusters: { rgb: RGB, count: number }[],
+ * }}
+ */
 export function clusterPixels(rgbList, { mergeDeltaE = 8, maxClusters = 512 } = {}) {
-  const clusters = []; // { rgb: [r,g,b] running centroid, count, lab }
+  /** @type {{ rgb: RGB, count: number, lab: Lab }[]} */
+  const clusters = []; // rgb is the running centroid
   const hashIndex = new Map(); // coarse hash key -> cluster indices
   const clusterIndexForPixel = [];
 
@@ -178,7 +194,10 @@ export function clusterPixels(rgbList, { mergeDeltaE = 8, maxClusters = 512 } = 
 
   return {
     clusterIndexForPixel,
-    clusters: clusters.map((c) => ({ rgb: c.rgb.map(Math.round), count: c.count })),
+    clusters: clusters.map((c) => ({
+      rgb: /** @type {RGB} */ (c.rgb.map(Math.round)),
+      count: c.count,
+    })),
   };
 }
 
@@ -213,6 +232,12 @@ export function clusterPixels(rgbList, { mergeDeltaE = 8, maxClusters = 512 } = 
 // cluster's highest-count member, its "medoid"), never a synthetic blended average -- callers
 // like the sprite editor's simplify slider can only relabel pixels onto a color that already
 // exists in the grid, not invent a new one, so this keeps both callers on the same footing.
+/**
+ * @template {{ rgb: RGB, count: number }} T
+ * @param {T[]} candidates
+ * @param {number} maxCount
+ * @returns {{ kept: T[], representativeOf: Map<T, T> }}
+ */
 export function reduceCandidates(candidates, maxCount) {
   if (candidates.length <= maxCount) {
     return { kept: [...candidates], representativeOf: new Map(candidates.map((c) => [c, c])) };
@@ -248,7 +273,9 @@ export function reduceCandidates(candidates, maxCount) {
     const a = clusters[bestI];
     const b = clusters[bestJ];
     const mergedCount = a.count + b.count;
-    const mergedRgb = [0, 1, 2].map((k) => (a.rgb[k] * a.count + b.rgb[k] * b.count) / mergedCount);
+    const mergedRgb = /** @type {RGB} */ (
+      [0, 1, 2].map((k) => (a.rgb[k] * a.count + b.rgb[k] * b.count) / mergedCount)
+    );
     const merged = {
       rgb: mergedRgb,
       count: mergedCount,

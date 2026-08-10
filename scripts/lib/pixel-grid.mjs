@@ -8,6 +8,27 @@ import { fileURLToPath } from "node:url";
 import sharp from "sharp";
 import { clusterPixels, reduceCandidates } from "../../shared/color-reduce.mjs";
 
+/**
+ * The canonical, versioned source format for a sprite -- see README.md's "The JSON pixel-grid
+ * format" section. `rows[y][x]` is either "." (transparent), a char resolved via the shared
+ * palette (art/legend.json), or a key in localPalette.
+ * @typedef {Object} SpriteRecord
+ * @property {string} name
+ * @property {number} width
+ * @property {number} height
+ * @property {string[]} rows
+ * @property {Record<string, string>} [localPalette] char -> "#rrggbb"
+ */
+
+/**
+ * One shared-palette color, derived from art/legend.json + art/palette.hex.
+ * @typedef {Object} PaletteEntry
+ * @property {string} char
+ * @property {string} hex
+ * @property {[number, number, number]} rgb
+ * @property {string} cssVar
+ */
+
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 export const ART_DIR = join(ROOT, "art");
 export const LEGEND_PATH = join(ART_DIR, "legend.json");
@@ -48,6 +69,7 @@ export const EXPORTS_DIR = join(ROOT, "exports");
 export const MIN_DIMENSION = 8;
 export const MAX_DIMENSION = 2048;
 
+/** @param {string} hex @returns {[number, number, number]} */
 function hexToRgb(hex) {
   const n = Number.parseInt(hex.slice(1), 16);
   return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
@@ -95,6 +117,7 @@ function loadPaletteEntries() {
 // this long-lived server process needs to see that without a restart. ES module named imports are
 // live bindings, so `export let` here is enough for server.mjs's `import { PALETTE_ENTRIES }` to
 // reflect a reload automatically.
+/** @type {PaletteEntry[]} */
 export let PALETTE_ENTRIES;
 let EXACT_GLOBAL_MATCH;
 
@@ -216,6 +239,7 @@ function computeDerivedPaletteState() {
 ensurePaletteFilesExist();
 computeDerivedPaletteState();
 
+/** Re-reads art/legend.json + art/palette.hex and recomputes everything derived from them. */
 export function reloadPaletteFromDisk() {
   computeDerivedPaletteState();
 }
@@ -247,6 +271,11 @@ function makeLocalPaletteAssigner() {
 // sprite editor's import endpoint to show an imported image at its full/native resolution (up to
 // that cap) instead of always crushing it down to a fixed sprite size first -- imageInputToGrid
 // below then letterboxes the (possibly non-square) source into that square, same as it always has.
+/**
+ * @param {string | Buffer} input a file path, or an image's raw bytes (e.g. an upload body)
+ * @param {{ maxDimension?: number }} [options]
+ * @returns {Promise<number>}
+ */
 export async function nativeGridSize(input, { maxDimension = MAX_DIMENSION } = {}) {
   const { width, height } = await sharp(input).metadata();
   return Math.max(MIN_DIMENSION, Math.min(maxDimension, Math.max(width, height)));
@@ -259,6 +288,18 @@ export async function nativeGridSize(input, { maxDimension = MAX_DIMENSION } = {
 // on some sources -- see the pipeline comments below); background removal is now an explicit, separate,
 // user-triggered action in the sprite editor instead of an automatic import step.
 // `input` is anything sharp() accepts: a file path string, or a Buffer (e.g. an upload body).
+/**
+ * @param {string | Buffer} input
+ * @param {{ size?: number, colorMode?: "precise" | "conform" }} [options]
+ * @returns {Promise<{
+ *   width: number,
+ *   height: number,
+ *   rows: string[],
+ *   localPalette: Record<string, string>,
+ *   colorMode: string,
+ *   reduction: { before: number, after: number } | null,
+ * }>}
+ */
 export async function imageInputToGrid(input, { size = 64, colorMode = "precise" } = {}) {
   const resized = await sharp(input)
     .ensureAlpha()
@@ -376,12 +417,14 @@ function reduceToFit(pixels, maxLocalColors) {
 
 const SPRITE_NAME_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
+/** @param {string} name @returns {boolean} */
 export function isValidSpriteName(name) {
   return typeof name === "string" && SPRITE_NAME_RE.test(name);
 }
 
 // Resolves a sprite name to its art/<name>.json path, or null if the name is invalid --
 // regex-checked AND path-resolution-checked (defense in depth even if the regex ever loosens).
+/** @param {string} name @returns {string | null} */
 export function spritePathFor(name) {
   if (!isValidSpriteName(name)) return null;
   const resolved = resolve(ART_DIR, `${name}.json`);
@@ -391,6 +434,7 @@ export function spritePathFor(name) {
 
 // Resolves a sprite name + extension to its exports/<name>.<ext> path, or null if the name is
 // invalid -- same regex-checked-and-path-resolution-checked defense in depth as spritePathFor.
+/** @param {string} name @param {string} ext @returns {string | null} */
 export function exportPathFor(name, ext) {
   if (!isValidSpriteName(name)) return null;
   const resolved = resolve(EXPORTS_DIR, `${name}.${ext}`);
@@ -408,6 +452,7 @@ const NON_SPRITE_JSON_FILES = new Set(["legend.json", "legend.example.json"]);
 // failure modes -- server.mjs's skipped bad files, build-sprites.mjs's didn't, so a single typo in
 // one sprite could take down the whole `npm run build:sprites` -- same "one implementation, not
 // several drifting copies" principle as everything else in this file.
+/** @returns {SpriteRecord[]} */
 export function loadAllSpriteRecords() {
   return readdirSync(ART_DIR)
     .filter((f) => f.endsWith(".json") && !NON_SPRITE_JSON_FILES.has(f))
@@ -438,6 +483,11 @@ export function loadAllSpriteRecords() {
 // standalone export that isn't guaranteed to ship alongside _palette-tokens.scss must never emit
 // var() for exactly that reason. Local-palette pixels (from imageInputToGrid's precise/conform
 // modes) always use their own raw hex regardless, since by definition they aren't shared tokens.
+/**
+ * @param {Pick<SpriteRecord, "rows" | "localPalette">} grid
+ * @param {{ hexOnly?: boolean }} [options]
+ * @returns {string[]} one `"Xpx Ypx <color>"` entry per non-transparent pixel
+ */
 export function gridToBoxShadow({ rows, localPalette }, { hexOnly = false } = {}) {
   const entries = [];
   rows.forEach((row, y) => {
@@ -461,6 +511,10 @@ export function gridToBoxShadow({ rows, localPalette }, { hexOnly = false } = {}
 // then the sprite's own local palette); `.` and any unrecognized char stay alpha 0 (the buffer
 // starts zeroed), matching gridToBoxShadow's silently-skip-unknown-chars behavior rather than
 // throwing.
+/**
+ * @param {Pick<SpriteRecord, "rows" | "localPalette">} grid
+ * @returns {{ width: number, height: number, buffer: Buffer }}
+ */
 export function gridToRgba({ rows, localPalette }) {
   const height = rows.length;
   const width = rows[0]?.length ?? 0;
@@ -487,6 +541,7 @@ export function gridToRgba({ rows, localPalette }) {
 // Same box-shadow text format scripts/build-sprites.mjs's private scssFor() produces, callable
 // directly for the sprite editor's standalone SCSS export (exports/<name>.scss) instead of
 // duplicating the template.
+/** @param {Pick<SpriteRecord, "name" | "rows" | "localPalette">} sprite @returns {string} */
 export function gridToScss({ name, rows, localPalette }) {
   // hexOnly: true -- this file is meant to be dropped into any project standalone (see
   // gridToBoxShadow's comment above), so it can never depend on a `:root` block it doesn't ship.
@@ -499,6 +554,12 @@ export function gridToScss({ name, rows, localPalette }) {
 // pixel resolution (one image pixel per grid cell) -- used by the sprite editor's export
 // endpoint. Keeps sharp usage centralized in this module rather than adding it as a direct
 // server.mjs dependency.
+/**
+ * @param {Pick<SpriteRecord, "rows" | "localPalette">} grid
+ * @param {"png" | "webp"} format
+ * @param {string} outPath
+ * @returns {Promise<void>}
+ */
 export async function writeGridImage({ rows, localPalette }, format, outPath) {
   const { width, height, buffer } = gridToRgba({ rows, localPalette });
   const image = sharp(buffer, { raw: { width, height, channels: 4 } });

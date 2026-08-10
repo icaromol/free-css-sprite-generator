@@ -8,9 +8,11 @@ UI.
 ## Design principles
 
 - **No framework, no bundler, no build step for the app itself.** The editor is vanilla
-  JS/CSS/HTML served by a hand-rolled `node:http` server. There's no `tsconfig.json`, no Vite/
-  Webpack config, nothing to compile before the code runs. The only "build" in this repo is
-  `scripts/build-sprites.mjs`, and what it builds is the *output* (SCSS), not the app.
+  JS/CSS/HTML served by a hand-rolled `node:http` server — no Vite/Webpack config, nothing to
+  compile before the code runs. `tsconfig.json` exists, but only for opt-in `checkJs` type-checking
+  (`npm run typecheck`) via JSDoc comments — it has `noEmit: true` and never transforms a file that
+  actually runs. The only real "build" in this repo is `scripts/build-sprites.mjs`, and what it
+  builds is the *output* (SCSS), not the app.
 - **One implementation, not several drifting copies.** Three different entry points
   (`scripts/png-to-grid.mjs`, `scripts/build-sprites.mjs`, `tools/sprite-editor/server.mjs`) all
   need to convert images to pixel grids and grids to CSS. Instead of each reimplementing that,

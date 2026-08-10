@@ -44,13 +44,19 @@ npm run format        # format only, writes fixes
 
 Run `npm run check` before opening a PR. Conventions to follow (already used throughout the
 codebase):
-- Plain JavaScript ES modules (`.mjs`), not TypeScript — no `tsconfig.json` exists, and there's no
-  build/transpile step to keep in sync.
+- Plain JavaScript ES modules (`.mjs`), not TypeScript — no build/transpile step, and runtime files
+  never change extension. Type-checking is opt-in via JSDoc + `tsconfig.json`'s `checkJs` (see
+  below), not a full TS migration -- deliberately, since the build-free design is load-bearing (see
+  [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)'s "Design principles").
 - `camelCase` for functions/variables, `SCREAMING_SNAKE_CASE` for module-level constants.
 - Functional/procedural style — no classes anywhere in the codebase.
 - Comments explain *why*, not *what* (rationale, tradeoffs, footguns avoided), and often
   cross-reference the file/section that must stay in sync (e.g. "see `MIN_DIMENSION` in
-  `pixel-grid.mjs`"). No JSDoc annotations.
+  `pixel-grid.mjs`").
+- Exported functions in `scripts/lib/pixel-grid.mjs` and `shared/color-reduce.mjs` carry JSDoc
+  `@param`/`@returns` types, checked by `npm run typecheck` (`tsc --noEmit`, no emit, no effect on
+  how anything runs). Add JSDoc types to new exports there; internal helpers and the rest of the
+  codebase aren't required to be typed.
 - Shared logic goes in `scripts/lib/pixel-grid.mjs` (Node-only) or `shared/` (needs to run in the
   browser too) rather than being duplicated between the CLI scripts and the editor server — see
   [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
@@ -64,9 +70,10 @@ issue — don't "fix" it by committing CRLF changes to unrelated files.
 There is currently no automated test suite (no test framework or test files in the repo). Verify
 changes manually:
 1. Run `npm run check` — catches syntax/lint/format issues.
-2. Run `npm run sprite-editor` and exercise the feature you changed in the browser (import, paint,
+2. Run `npm run typecheck` — catches type/shape mismatches in the JSDoc-annotated exports.
+3. Run `npm run sprite-editor` and exercise the feature you changed in the browser (import, paint,
    resize, color-reduce, save, export, as relevant).
-3. Run `npm run build:sprites` and confirm the generated `styles/sprites/_*.scss` looks right.
+4. Run `npm run build:sprites` and confirm the generated `styles/sprites/_*.scss` looks right.
 
 If you're changing `scripts/lib/pixel-grid.mjs` or `shared/color-reduce.mjs`, test through **all
 three** surfaces that depend on them (editor import, `grid:from-png`, `build:sprites`) — that
